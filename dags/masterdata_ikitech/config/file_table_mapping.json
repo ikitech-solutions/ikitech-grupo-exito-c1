@@ -1,0 +1,86 @@
+{
+  "XWECIA.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_COMPANIA",
+    "kafka_topic": "masterdata.erp.compania",
+    "descripcion": "Maestras de Compañías",
+    "registros_estimados": 10,
+    "campos_clave": ["CODCIA"]
+  },
+  "XWEPAI.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_PAIS",
+    "kafka_topic": "masterdata.erp.pais",
+    "descripcion": "Maestras de Países",
+    "registros_estimados": 50,
+    "campos_clave": ["COD_PAIS"]
+  },
+  "XCIUDAD.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_CIUDAD",
+    "kafka_topic": "masterdata.erp.ciudad",
+    "descripcion": "Maestras de Ciudades",
+    "registros_estimados": 500,
+    "campos_clave": ["COD_PAIS", "CIUDAD"]
+  },
+  "XWEDEP.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_DEPENDENCIA",
+    "kafka_topic": "masterdata.erp.dependencia",
+    "descripcion": "Maestras de Dependencias",
+    "registros_estimados": 100,
+    "campos_clave": ["DEPEN"]
+  },
+  "XLEXSUBL.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_SUBLINEA",
+    "kafka_topic": "masterdata.erp.sublinea",
+    "descripcion": "Maestras de Sublíneas",
+    "registros_estimados": 200,
+    "campos_clave": ["CODCIA", "SUBLIN"]
+  },
+  "XCADENA.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_CADENA",
+    "kafka_topic": "masterdata.erp.cadena",
+    "descripcion": "Maestras de Cadenas",
+    "registros_estimados": 25,
+    "campos_clave": ["CODCADE"]
+  },
+  "XGEN.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_GERENCIA",
+    "kafka_topic": "masterdata.erp.gerencia",
+    "descripcion": "Maestras de Gerencias",
+    "registros_estimados": 50,
+    "campos_clave": ["CODCIA", "DIVIS"]
+  },
+  "XCATEG.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_CATEGORIA",
+    "kafka_topic": "masterdata.erp.categoria",
+    "descripcion": "Maestras de Categorías",
+    "registros_estimados": 1000,
+    "campos_clave": ["CODCIA", "SUBLIN", "CATEGO"]
+  },
+  "XLEXSUBC.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_SUBCATEGORIA",
+    "kafka_topic": "masterdata.erp.subcategoria",
+    "descripcion": "Maestras de Subcategorías",
+    "registros_estimados": 500,
+    "campos_clave": ["CODCIA", "GRUPO", "CATEGO"]
+  },
+  "XUEN.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_UEN",
+    "kafka_topic": "masterdata.erp.uen",
+    "descripcion": "Maestras de Unidades de Negocio",
+    "registros_estimados": 100,
+    "campos_clave": ["CODCIA", "DEPTO"]
+  },
+  "XCAN.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_CANAL",
+    "kafka_topic": "masterdata.erp.canal",
+    "descripcion": "Maestras de Canales",
+    "registros_estimados": 20,
+    "campos_clave": ["CANAL"]
+  },
+  "CRLISUCATE.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_SEGMENTOS",
+    "kafka_topic": "masterdata.erp.segmentos",
+    "descripcion": "Maestras de Segmentos",
+    "registros_estimados": 300,
+    "campos_clave": ["CODCIA", "SUBLIN", "SUBCATEGO", "SEGMENS"]
+  }
+}

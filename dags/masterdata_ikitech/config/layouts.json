@@ -1,0 +1,301 @@
+{
+  "XUEN.txt": {
+    "tabla_destino": "db_masterdata_hub.UEN",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "DEPTO",
+        "tipo": "string",
+        "start": 0,
+        "end": 3,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 3,
+        "end": 33,
+        "required": true
+      },
+      {
+        "nombre": "DIVIS1",
+        "tipo": "string",
+        "start": 33,
+        "end": 35,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XCIUDAD.txt": {
+    "tabla_destino": "db_masterdata_hub.CIUDAD",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "CIUDAD",
+        "tipo": "string",
+        "start": 0,
+        "end": 3,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 3,
+        "end": 33,
+        "required": true
+      },
+      {
+        "nombre": "SUBZONA",
+        "tipo": "string",
+        "start": 33,
+        "end": 35,
+        "required": true
+      },
+      {
+        "nombre": "CLIMA",
+        "tipo": "string",
+        "start": 35,
+        "end": 37,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XWEDEP.txt": {
+    "tabla_destino": "db_masterdata_hub.DEPENDENCIA",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "DEPEN",
+        "tipo": "string",
+        "start": 0,
+        "end": 4,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 4,
+        "end": 34,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XWECIA.txt": {
+    "tabla_destino": "db_masterdata_hub.COMPANIA",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "CODCIA",
+        "tipo": "string",
+        "start": 0,
+        "end": 2,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 2,
+        "end": 32,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XWEPAI.txt": {
+    "tabla_destino": "db_masterdata_hub.PAIS",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "COD_PAIS",
+        "tipo": "string",
+        "start": 0,
+        "end": 4,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 4,
+        "end": 34,
+        "required": true
+      },
+      {
+        "nombre": "COD_MON",
+        "tipo": "string",
+        "start": 34,
+        "end": 36,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XGEN.txt": {
+    "tabla_destino": "db_masterdata_hub.GERENCIA",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "DIVIS",
+        "tipo": "string",
+        "start": 0,
+        "end": 2,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 2,
+        "end": 32,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XCADENA.txt": {
+    "tabla_destino": "db_masterdatahub.CADENA",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "CODCADE",
+        "tipo": "string",
+        "start": 0,
+        "end": 1,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 1,
+        "end": 31,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XCAN.txt": {
+    "tabla_destino": "db_masterdatahub.CANAL",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "CANAL",
+        "tipo": "string",
+        "start": 0,
+        "end": 2,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 2,
+        "end": 32,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XLEXSUBC.txt": {
+    "tabla_destino": "db_masterdatahub.SUBCATEGORIA",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "GRUPO",
+        "tipo": "string",
+        "index": 0,
+        "required": true
+      },
+      {
+        "nombre": "CATEGO",
+        "tipo": "string",
+        "index": 1,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "index": 5,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XCATEG.txt": {
+    "tabla_destino": "db_masterdata_hub.CATEGORIA",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "SUBLIN",
+        "tipo": "string",
+        "start": 0,
+        "end": 3,
+        "required": true
+      },
+      {
+        "nombre": "CATEGO",
+        "tipo": "string",
+        "start": 3,
+        "end": 8,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "start": 8,
+        "end": 38,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "XLEXSUBL.txt": {
+    "tabla_destino": "db_masterdatahub.SUBLINEA",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "SUBLIN",
+        "tipo": "string",
+        "index": 0,
+        "required": true
+      },
+      {
+        "nombre": "NOMBRE",
+        "tipo": "string",
+        "index": 3,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  },
+  "CRLISUCATE.txt": {
+    "tabla_destino": "db_masterdatahub.erp_SEGMENTOS",
+    "encoding": "latin-1",
+    "campos": [
+      {
+        "nombre": "SUBLIN",
+        "tipo": "string",
+        "index": 6,
+        "required": true
+      },
+      {
+        "nombre": "SUBCATEGO",
+        "tipo": "string",
+        "index": 10,
+        "required": true
+      },
+      {
+        "nombre": "SEGMENS",
+        "tipo": "string",
+        "index": 13,
+        "required": true
+      },
+      {
+        "nombre": "NOMSEGS",
+        "tipo": "string",
+        "index": 14,
+        "required": true
+      }
+    ],
+    "campos_hardcoded": {}
+  }
+}
