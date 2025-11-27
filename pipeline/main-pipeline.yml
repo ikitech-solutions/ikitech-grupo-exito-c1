@@ -1,0 +1,78 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+- group: airflow-variables
+
+stages:
+- stage: Build
+  displayName: 'Build and Test'
+  jobs:
+  - job: Build
+    displayName: 'Build'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '3.11'
+
+    - script: |
+        pip install poetry
+        poetry install
+      displayName: 'Install dependencies'
+
+    - script: |
+        poetry run pytest --cov=dags --cov-report=xml
+      displayName: 'Run tests'
+
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFiles: '**/test-*.xml'
+        testRunTitle: 'Python $(python.version)'
+
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(System.DefaultWorkingDirectory)/coverage.xml'
+
+    - task: ArchiveFiles@2
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        replaceExistingArchive: true
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+
+- stage: Deploy
+  displayName: 'Deploy to Airflow'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeployToDev
+    displayName: 'Deploy to Development'
+    environment: 'development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: DownloadBuildArtifacts@0
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'drop'
+              downloadPath: '$(System.ArtifactsDirectory)'
+
+          - script: |
+              # Aquí iría el script para desplegar el DAG en Airflow
+              # Por ejemplo, copiar los archivos al GCS bucket de DAGs
+              echo "Deploying to Airflow..."
+              unzip $(System.ArtifactsDirectory)/drop/$(Build.BuildId).zip -d $(System.ArtifactsDirectory)/drop/unzipped
+              # gsutil cp -r $(System.ArtifactsDirectory)/drop/unzipped/dags/* gs://<gcs-bucket>/dags/
+            displayName: 'Deploy DAGs'
