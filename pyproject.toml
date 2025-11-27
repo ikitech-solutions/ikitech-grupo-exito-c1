@@ -2,7 +2,7 @@
 name = "erp-maestras-ikitech"
 version = "1.0.0"
 description = "Ingesta de maestras ERP para Grupo Éxito"
-authors = ["IkiTech <data-team@ikitech.com>"]
+authors = ["IkiTech <manuela.larrea@ikitech.com.co>"]
 
 [tool.poetry.dependencies]
 python = "^3.11"
