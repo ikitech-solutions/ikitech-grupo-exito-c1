@@ -6,7 +6,7 @@ de los datos antes de ser procesados.
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import re
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ class DataValidator:
         """Inicializa el validador."""
         self.errores = []
     
-    def validate_record(self, record: Dict[str, Any], validation_rules: Dict[str, Any]) -> tuple[bool, List[str]]:
+    def validate_record(self, record: Dict[str, Any], validation_rules: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """
         Valida un registro según reglas de validación.
         
@@ -138,7 +138,7 @@ class DataValidator:
         return resultado
 
 
-def validate_compania(record: Dict[str, Any]) -> tuple[bool, List[str]]:
+def validate_compania(record: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Valida un registro de COMPANIA."""
     rules = {
         'required_fields': ['CODCIA', 'NOMBRE'],
@@ -156,7 +156,7 @@ def validate_compania(record: Dict[str, Any]) -> tuple[bool, List[str]]:
     return validator.validate_record(record, rules)
 
 
-def validate_pais(record: Dict[str, Any]) -> tuple[bool, List[str]]:
+def validate_pais(record: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Valida un registro de PAIS."""
     rules = {
         'required_fields': ['COD_PAIS', 'NOMBRE'],
@@ -176,7 +176,7 @@ def validate_pais(record: Dict[str, Any]) -> tuple[bool, List[str]]:
     return validator.validate_record(record, rules)
 
 
-def validate_ciudad(record: Dict[str, Any]) -> tuple[bool, List[str]]:
+def validate_ciudad(record: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Valida un registro de CIUDAD."""
     rules = {
         'required_fields': ['COD_PAIS', 'CIUDAD', 'NOMBRE'],
@@ -194,7 +194,7 @@ def validate_ciudad(record: Dict[str, Any]) -> tuple[bool, List[str]]:
     return validator.validate_record(record, rules)
 
 
-def validate_cadena(record: Dict[str, Any]) -> tuple[bool, List[str]]:
+def validate_cadena(record: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Valida un registro de CADENA."""
     rules = {
         'required_fields': ['CODCADE', 'NOMBRE'],
@@ -207,7 +207,7 @@ def validate_cadena(record: Dict[str, Any]) -> tuple[bool, List[str]]:
     return validator.validate_record(record, rules)
 
 
-def validate_canal(record: Dict[str, Any]) -> tuple[bool, List[str]]:
+def validate_canal(record: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Valida un registro de CANAL."""
     rules = {
         'required_fields': ['CANAL'],

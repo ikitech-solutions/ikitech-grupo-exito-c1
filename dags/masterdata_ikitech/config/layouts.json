@@ -297,5 +297,19 @@
       }
     ],
     "campos_hardcoded": {}
+  },
+
+  "XMONEDA.txt": {
+    "tabla_destino": "db_masterdatahub.MONEDA",
+    "encoding": "latin-1",
+    "campos": [
+      { "nombre": "COD_MON",
+        "tipo": "numeric",
+        "start": 0,
+        "end": 2,
+        "required": true },
+      { "nombre": "NOMBRE", "tipo": "string", "start": 2, "end": 32, "required": true }
+    ],
+    "campos_hardcoded": {}
   }
 }

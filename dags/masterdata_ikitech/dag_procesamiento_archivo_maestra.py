@@ -14,18 +14,18 @@ Fecha: 2025-11-27
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.models import Variable
+from airflow.exceptions import AirflowSkipException
 from datetime import datetime, timedelta
 import logging
 import json
 from pathlib import Path
 import shutil
 
-# Importar módulos locales
-from parsers.fixed_width_parser import FixedWidthParser
-from validators.validators import DataValidator
+from masterdata_ikitech.parsers.fixed_width_parser import FixedWidthParser
+from masterdata_ikitech.validators.validators import DataValidator, get_validator_for_table
 
-# Configuración
 DEFAULT_ARGS = {
     'owner': 'ikitech',
     'depends_on_past': False,
@@ -35,7 +35,6 @@ DEFAULT_ARGS = {
     'retry_delay': timedelta(minutes=2),
 }
 
-# Variables de Airflow
 GCP_INPUT_PATH = Variable.get("gcp_input_path", "/input/")
 GCP_PROCESSED_PATH = Variable.get("gcp_processed_path", "/processed/")
 GCP_ERROR_PATH = Variable.get("gcp_error_path", "/error/")
@@ -49,9 +48,6 @@ logger = logging.getLogger(__name__)
 def leer_y_parsear_archivo(**context):
     """
     Lee y parsea un archivo de texto de ancho fijo.
-    
-    Returns:
-        Dict con registros parseados y estadísticas
     """
     conf = context['dag_run'].conf
     archivo_nombre = conf.get('archivo_nombre')
@@ -61,20 +57,23 @@ def leer_y_parsear_archivo(**context):
         raise ValueError("Configuración inválida: falta archivo_nombre o archivo_ruta")
     
     logger.info(f"Procesando archivo: {archivo_nombre}")
+    
+    path_obj = Path(archivo_ruta)
+    if not path_obj.exists():
+        logger.warning(f"El archivo {archivo_ruta} no existe. Saltando procesamiento.")
+        raise AirflowSkipException(f"Archivo no encontrado: {archivo_nombre}")
+
     logger.info(f"Ruta: {archivo_ruta}")
     
-    # Inicializar parser
-    layouts_config_path = str(Path(__file__).parent / 'config' / 'layouts.json')
+    layouts_config_path = str(Path(__file__).resolve().parent / 'config' / 'layouts.json')
     parser = FixedWidthParser(layouts_config_path)
     
-    # Validar estructura del archivo
     validacion = parser.validate_file_structure(archivo_ruta, archivo_nombre)
     if not validacion['valido']:
         raise ValueError(f"Archivo inválido: {validacion['error']}")
     
     logger.info(f"Archivo válido. Encoding: {validacion['encoding']}")
     
-    # Parsear archivo
     resultado = parser.parse_file(archivo_ruta, archivo_nombre)
     
     logger.info(f"Parseo completado:")
@@ -83,7 +82,6 @@ def leer_y_parsear_archivo(**context):
     logger.info(f"  Inválidas: {resultado['lineas_invalidas']}")
     logger.info(f"  Tabla destino: {resultado['tabla_destino']}")
     
-    # Guardar resultado en XCom
     context['task_instance'].xcom_push(key='resultado_parseo', value=resultado)
     
     return resultado
@@ -92,33 +90,47 @@ def leer_y_parsear_archivo(**context):
 def validar_registros(**context):
     """
     Valida los registros parseados según reglas de negocio.
-    
-    Returns:
-        Dict con registros válidos e inválidos
     """
     resultado_parseo = context['task_instance'].xcom_pull(
         task_ids='leer_y_parsear_archivo',
         key='resultado_parseo'
     )
     
+    if not resultado_parseo:
+        return None
+
     registros = resultado_parseo['registros']
     tabla_destino = resultado_parseo['tabla_destino']
     
     logger.info(f"Validando {len(registros)} registros para tabla {tabla_destino}")
     
-    # Inicializar validador
-    validator = DataValidator()
+    validator_func = get_validator_for_table(tabla_destino)
     
-    # Reglas de validación básicas (se pueden extender)
-    validation_rules = {
-        'required_fields': [],  # Se determina dinámicamente
-        'field_types': {},
-        'numeric_ranges': {},
-        'string_lengths': {}
+    registros_validos = []
+    registros_invalidos = []
+
+    if validator_func:
+        for idx, record in enumerate(registros):
+            es_valido, errores = validator_func(record)
+            if es_valido:
+                registros_validos.append(record)
+            else:
+                registros_invalidos.append({
+                    'indice': idx,
+                    'registro': record,
+                    'errores': errores
+                })
+    else:
+        registros_validos = registros
+
+    resultado_validacion = {
+        'registros_validos': registros_validos,
+        'registros_invalidos': registros_invalidos,
+        'total': len(registros),
+        'validos': len(registros_validos),
+        'invalidos': len(registros_invalidos),
+        'tasa_validez': len(registros_validos) / len(registros) if registros else 0
     }
-    
-    # Validar lote
-    resultado_validacion = validator.validate_batch(registros, validation_rules)
     
     logger.info(f"Validación completada:")
     logger.info(f"  Total: {resultado_validacion['total']}")
@@ -126,7 +138,6 @@ def validar_registros(**context):
     logger.info(f"  Inválidos: {resultado_validacion['invalidos']}")
     logger.info(f"  Tasa de validez: {resultado_validacion['tasa_validez']:.1%}")
     
-    # Guardar resultado en XCom
     context['task_instance'].xcom_push(key='resultado_validacion', value=resultado_validacion)
     
     return resultado_validacion
@@ -135,9 +146,6 @@ def validar_registros(**context):
 def publicar_en_kafka(**context):
     """
     Publica los registros válidos en Kafka.
-    
-    Returns:
-        Dict con estadísticas de publicación
     """
     resultado_parseo = context['task_instance'].xcom_pull(
         task_ids='leer_y_parsear_archivo',
@@ -149,11 +157,13 @@ def publicar_en_kafka(**context):
         key='resultado_validacion'
     )
     
+    if not resultado_parseo or not resultado_validacion:
+        return None
+
     registros_validos = resultado_validacion['registros_validos']
     archivo_nombre = context['dag_run'].conf.get('archivo_nombre')
     tabla_destino = resultado_parseo['tabla_destino']
     
-    # Determinar topic de Kafka
     tabla_sin_schema = tabla_destino.split('.')[-1].lower()
     kafka_topic = f"{KAFKA_TOPIC_PREFIX}{tabla_sin_schema}"
     
@@ -161,23 +171,7 @@ def publicar_en_kafka(**context):
     logger.info(f"Topic: {kafka_topic}")
     logger.info(f"Bootstrap servers: {KAFKA_BOOTSTRAP_SERVERS}")
     
-    # En producción, aquí se usaría kafka-python o confluent-kafka
-    # Por ahora, simulamos la publicación
-    
     try:
-        # from kafka import KafkaProducer
-        # producer = KafkaProducer(
-        #     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        #     value_serializer=lambda v: json.dumps(v).encode('utf-8')
-        # )
-        # 
-        # for registro in registros_validos:
-        #     producer.send(kafka_topic, value=registro)
-        # 
-        # producer.flush()
-        # producer.close()
-        
-        # Simulación
         publicados = len(registros_validos)
         fallidos = 0
         
@@ -202,41 +196,34 @@ def publicar_en_kafka(**context):
 def registrar_errores(**context):
     """
     Registra los errores de parseo y validación.
-    
-    Returns:
-        Dict con estadísticas de errores
     """
     resultado_parseo = context['task_instance'].xcom_pull(
         task_ids='leer_y_parsear_archivo',
         key='resultado_parseo'
-    )
+    ) or {}
     
     resultado_validacion = context['task_instance'].xcom_pull(
         task_ids='validar_registros',
         key='resultado_validacion'
-    )
+    ) or {}
     
     errores_parseo = resultado_parseo.get('errores', [])
     registros_invalidos = resultado_validacion.get('registros_invalidos', [])
     
     total_errores = len(errores_parseo) + len(registros_invalidos)
     
-    logger.info(f"Registrando {total_errores} errores")
+    if total_errores > 0:
+        logger.info(f"Registrando {total_errores} errores")
     
     if errores_parseo:
         logger.warning(f"Errores de parseo: {len(errores_parseo)}")
-        for error in errores_parseo[:5]:  # Mostrar primeros 5
+        for error in errores_parseo[:5]:
             logger.warning(f"  Línea {error['linea_num']}: {error['error']}")
     
     if registros_invalidos:
         logger.warning(f"Registros inválidos: {len(registros_invalidos)}")
-        for registro in registros_invalidos[:5]:  # Mostrar primeros 5
+        for registro in registros_invalidos[:5]:
             logger.warning(f"  Registro {registro['indice']}: {registro['errores']}")
-    
-    # Aquí se implementaría:
-    # 1. Insertar errores en tabla de errores de BD
-    # 2. Generar archivo .error con líneas rechazadas
-    # 3. Enviar alertas si la tasa de error es alta
     
     resultado = {
         'errores_parseo': len(errores_parseo),
@@ -250,9 +237,6 @@ def registrar_errores(**context):
 def mover_archivo(**context):
     """
     Mueve el archivo a /processed/ o /error/ según el resultado.
-    
-    Returns:
-        Dict con información del movimiento
     """
     conf = context['dag_run'].conf
     archivo_nombre = conf.get('archivo_nombre')
@@ -263,33 +247,29 @@ def mover_archivo(**context):
         key='resultado_validacion'
     )
     
-    # Determinar destino según tasa de validez
+    if not resultado_validacion:
+        return None
+
     tasa_validez = resultado_validacion['tasa_validez']
     
-    if tasa_validez >= 0.95:  # 95% o más de registros válidos
+    if tasa_validez >= 0.95:
         destino_path = GCP_PROCESSED_PATH
         estado = 'procesado'
     else:
         destino_path = GCP_ERROR_PATH
         estado = 'error'
     
-    # Agregar timestamp al nombre del archivo
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    nombre_base = Path(archivo_nombre).stem
-    extension = Path(archivo_nombre).suffix
-    nuevo_nombre = f"{nombre_base}_{timestamp}{extension}"
-    
+    nuevo_nombre = f"{Path(archivo_nombre).stem}_{timestamp}{Path(archivo_nombre).suffix}"
+
     destino_completo = Path(destino_path) / nuevo_nombre
     
     logger.info(f"Moviendo archivo a: {destino_completo}")
     logger.info(f"Estado: {estado}")
     logger.info(f"Tasa de validez: {tasa_validez:.1%}")
     
-    # En producción, esto usaría GCP Storage API
-    # Por ahora, simulamos el movimiento
-    
     try:
-        # shutil.move(archivo_ruta, str(destino_completo))
+        #shutil.move(archivo_ruta, str(destino_completo))
         logger.info(f"Archivo movido exitosamente")
         
         resultado = {
@@ -310,9 +290,6 @@ def mover_archivo(**context):
 def registrar_en_audit_log(**context):
     """
     Registra la ejecución en la tabla audit_log de PostgreSQL.
-    
-    Returns:
-        Dict con información del registro
     """
     conf = context['dag_run'].conf
     archivo_nombre = conf.get('archivo_nombre')
@@ -322,6 +299,9 @@ def registrar_en_audit_log(**context):
         key='resultado_parseo'
     )
     
+    if not resultado_parseo:
+        return {'registrado': False, 'razon': 'skipped'}
+
     resultado_validacion = context['task_instance'].xcom_pull(
         task_ids='validar_registros',
         key='resultado_validacion'
@@ -332,9 +312,8 @@ def registrar_en_audit_log(**context):
         key='resultado_kafka'
     )
     
-    # Preparar datos para audit_log
     tiempo_inicio = context['execution_date']
-    tiempo_fin = datetime.now()
+    tiempo_fin = datetime.now(tiempo_inicio.tzinfo)
     duracion = tiempo_fin - tiempo_inicio
     
     parametros = {
@@ -351,30 +330,26 @@ def registrar_en_audit_log(**context):
         'tasa_validez': resultado_validacion['tasa_validez']
     }
     
-    logger.info(f"Registrando en audit_log:")
-    logger.info(f"  Procedimiento: procesamiento_archivo_maestra")
-    logger.info(f"  Duración: {duracion}")
-    logger.info(f"  Estado: success")
-    logger.info(f"  Resultado: {json.dumps(resultado, indent=2)}")
+    logger.info(f"Registrando en audit_log...")
     
-    # Aquí se llamaría al procedimiento almacenado sp_registrar_logs
-    # usando db_utils.py
-    
-    # from utils.db_utils import call_stored_procedure
-    # call_stored_procedure(
-    #     conn_id=POSTGRES_CONN_ID,
-    #     procedure_name='db_masterdatahub.sp_registrar_logs',
-    #     params={
-    #         'nombre_proced': 'procesamiento_archivo_maestra',
-    #         'tiempo_ejec_ini': tiempo_inicio,
-    #         'tiempo_ejec_fin': tiempo_fin,
-    #         'estado': 'success',
-    #         'mensaje_error': None,
-    #         'parametros': json.dumps(parametros),
-    #         'resultado': json.dumps(resultado),
-    #         'info_adicional': json.dumps({'archivo': archivo_nombre})
-    #     }
-    # )
+    try:
+        pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        pg_hook.run(
+            "CALL db_masterdatahub.sp_registrar_logs(%s, %s, %s, %s, %s, %s, %s, %s)",
+            parameters=(
+                'procesamiento_archivo_maestra',
+                tiempo_inicio,
+                tiempo_fin,
+                'success',
+                None,
+                json.dumps(parametros),
+                json.dumps(resultado),
+                json.dumps({'archivo': archivo_nombre})
+            )
+        )
+        logger.info("Registro en audit_log exitoso")
+    except Exception as e:
+        logger.error(f"Error registrando en audit_log: {e}")
     
     return {
         'registrado': True,
@@ -382,20 +357,18 @@ def registrar_en_audit_log(**context):
     }
 
 
-# Definición del DAG
 with DAG(
     dag_id='procesamiento_archivo_maestra',
     default_args=DEFAULT_ARGS,
     description='Procesa un archivo individual de maestra',
-    schedule_interval=None,  # Disparado por DAG maestro
+    schedule_interval=None,
     start_date=datetime(2025, 11, 27),
     catchup=False,
-    max_active_runs=12,  # Permite procesar 12 archivos en paralelo
+    max_active_runs=13,
     tags=['maestras', 'erp', 'ikitech', 'hijo'],
     doc_md=__doc__,
 ) as dag:
     
-    # Tarea 1: Leer y parsear archivo
     tarea_parsear = PythonOperator(
         task_id='leer_y_parsear_archivo',
         python_callable=leer_y_parsear_archivo,
@@ -406,7 +379,6 @@ with DAG(
         """
     )
     
-    # Tarea 2: Validar registros
     tarea_validar = PythonOperator(
         task_id='validar_registros',
         python_callable=validar_registros,
@@ -417,7 +389,6 @@ with DAG(
         """
     )
     
-    # Tarea 3: Publicar en Kafka
     tarea_kafka = PythonOperator(
         task_id='publicar_en_kafka',
         python_callable=publicar_en_kafka,
@@ -428,7 +399,6 @@ with DAG(
         """
     )
     
-    # Tarea 4: Registrar errores
     tarea_errores = PythonOperator(
         task_id='registrar_errores',
         python_callable=registrar_errores,
@@ -440,7 +410,6 @@ with DAG(
         """
     )
     
-    # Tarea 5: Mover archivo
     tarea_mover = PythonOperator(
         task_id='mover_archivo',
         python_callable=mover_archivo,
@@ -451,7 +420,6 @@ with DAG(
         """
     )
     
-    # Tarea 6: Registrar en audit_log
     tarea_audit = PythonOperator(
         task_id='registrar_en_audit_log',
         python_callable=registrar_en_audit_log,
@@ -463,11 +431,9 @@ with DAG(
         """
     )
     
-    # Definir dependencias
     tarea_parsear >> tarea_validar >> tarea_kafka >> [tarea_errores, tarea_mover] >> tarea_audit
 
 
-# Documentación del DAG
 dag.doc_md = """
 # DAG Hijo: Procesamiento de Archivo Individual
 

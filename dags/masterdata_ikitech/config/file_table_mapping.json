@@ -82,5 +82,12 @@
     "descripcion": "Maestras de Segmentos",
     "registros_estimados": 300,
     "campos_clave": ["CODCIA", "SUBLIN", "SUBCATEGO", "SEGMENS"]
+  },
+  "XMONEDA.txt": {
+    "tabla_destino": "db_masterdata_hub.erp_MONEDA",
+    "kafka_topic": "masterdata.erp.moneda",
+    "descripcion": "Maestras de Monedas",
+    "registros_estimados": 10,
+    "campos_clave": ["COD_MON"]
   }
 }
