@@ -1,0 +1,13 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: erp-maestras-ikitech
+  description: Ingesta de maestras ERP para Grupo Éxito
+  annotations:
+    github.com/project-slug: grupo-exito/erp-maestras-ikitech
+    backstage.io/techdocs-ref: dir:./docs
+spec:
+  type: service
+  lifecycle: production
+  owner: data-team
+  system: erp

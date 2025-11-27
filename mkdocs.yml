@@ -1,0 +1,48 @@
+site_name: Documentación - Ingesta de Maestras ERP
+site_url: https://docs.grupo-exito.com/ingesta-maestras
+
+nav:
+  - Home: index.md
+  - Arquitectura: arquitectura.md
+  - Configuración: configuracion.md
+  - Operación: operacion.md
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.annotation
+    - content.code.copy
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.mark
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+  - mermaid2
+
+copyright: Copyright &copy; 2025 Grupo Éxito
