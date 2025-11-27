@@ -138,7 +138,7 @@ poetry run mkdocs serve
 ## Contribuciones
 
 - **Equipo:** IkiTech
-- **Contacto:** data-team@ikitech.com
+- **Contacto:** manuela.larrea@ikitech.com.co, jeferson.mesa@ikitech.com.co
 
 Para contribuir, por favor seguir el flujo de GitFlow:
 1. Crear una rama `feature/` desde `develop`
