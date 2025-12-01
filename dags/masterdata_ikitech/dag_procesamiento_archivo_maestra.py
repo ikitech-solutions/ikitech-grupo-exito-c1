@@ -49,45 +49,57 @@ logger = logging.getLogger(__name__)
 def leer_y_parsear_archivo(**context):
     """
     Lee y parsea un archivo de texto de ancho fijo o delimitado.
-    Implementa búsqueda por coincidencia parcial de nombre.
+    Maneja archivos vacíos sin fallar técnicamente.
     """
     conf = context['dag_run'].conf
-    archivo_nombre_base = conf.get('archivo_nombre') # Ej: XWECIA.txt
+    archivo_nombre_base = conf.get('archivo_nombre')
     
     if not archivo_nombre_base:
         raise ValueError("Configuración inválida: falta archivo_nombre")
     
-    # Limpiamos la extensión para buscar cualquier variación del nombre base
-    nombre_busqueda = Path(archivo_nombre_base).stem # Ej: XWECIA
+    nombre_busqueda = Path(archivo_nombre_base).stem
     input_dir = Path(GCP_INPUT_PATH)
     
     logger.info(f"Buscando archivo que contenga: {nombre_busqueda} en {input_dir}")
     
-    # Archivo que empiece con el nombre base
     archivos_encontrados = list(input_dir.glob(f"{nombre_busqueda}*"))
     
     if not archivos_encontrados:
         logger.warning(f"No se encontró ningún archivo que coincida con {nombre_busqueda}. Saltando.")
         raise AirflowSkipException(f"Archivo no encontrado: {nombre_busqueda}")
     
-    # Tomamos el primer archivo encontrado
     archivo_real = archivos_encontrados[0]
     archivo_ruta = str(archivo_real)
     
     logger.info(f"Archivo encontrado: {archivo_real.name}")
-    logger.info(f"Ruta completa: {archivo_ruta}")
     
-    # Guardamos el nombre real encontrado para usarlo en las siguientes tareas
     context['task_instance'].xcom_push(key='archivo_real_nombre', value=archivo_real.name)
     context['task_instance'].xcom_push(key='archivo_real_ruta', value=archivo_ruta)
     
     layouts_config_path = str(Path(__file__).resolve().parent / 'config' / 'layouts.json')
     parser = FixedWidthParser(layouts_config_path)
     
-    # Usamos el nombre base original para buscar el layout, no el nombre con fecha
+    # Validación de estructura inicial
     validacion = parser.validate_file_structure(archivo_ruta, archivo_nombre_base)
+    
+    # Manejo especial para archivo vacío en validación
     if not validacion['valido']:
-        raise ValueError(f"Archivo inválido: {validacion['error']}")
+        if validacion.get('error') == "Archivo vacío":
+            logger.error(f"Archivo VACÍO detectado: {archivo_real.name}. Se enviará a ERROR.")
+            resultado_vacio = {
+                'registros': [],
+                'errores': [],
+                'total_lineas': 0,
+                'lineas_validas': 0,
+                'lineas_invalidas': 0,
+                'tabla_destino': None,
+                'archivo': archivo_real.name,
+                'es_vacio': True
+            }
+            context['task_instance'].xcom_push(key='resultado_parseo', value=resultado_vacio)
+            return resultado_vacio
+        else:
+            raise ValueError(f"Archivo inválido: {validacion['error']}")
     
     logger.info(f"Archivo válido. Encoding: {validacion['encoding']}")
     
@@ -115,17 +127,13 @@ def validar_registros(**context):
     """
     Valida los registros parseados según reglas de negocio.
     """
-    resultado_parseo = context['task_instance'].xcom_pull(
-        task_ids='leer_y_parsear_archivo',
-        key='resultado_parseo'
-    )
+    resultado_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
     
-    if not resultado_parseo:
-        return None
+    if not resultado_parseo: return None
 
-    # Si viene vacío, retornamos estructura mínima para que mover_archivo decida
+    # Si viene vacío, pasamos directo
     if resultado_parseo.get('es_vacio'):
-        return {'tasa_validez': 0, 'es_vacio': True}
+        return {'lineas_validas_count': 0, 'es_vacio': True}
 
     registros = resultado_parseo['registros']
     tabla_destino = resultado_parseo['tabla_destino']
@@ -143,15 +151,9 @@ def validar_registros(**context):
             if es_valido:
                 registros_validos.append(record)
             else:
-                registros_invalidos.append({
-                    'indice': idx,
-                    'registro': record,
-                    'errores': errores
-                })
+                registros_invalidos.append({'idx': idx, 'err': errores})
     else:
         registros_validos = registros
-
-    tasa_validez = len(registros_validos) / len(registros) if registros else 0
 
     if len(registros_invalidos) > 0:
         logger.warning(f"{len(registros_invalidos)} registros rechazados por validación de negocio.")
@@ -159,14 +161,11 @@ def validar_registros(**context):
     resultado_validacion = {
         'registros_validos': registros_validos,
         'registros_invalidos': registros_invalidos,
-        'total': len(registros),
-        'validos': len(registros_validos),
-        'invalidos': len(registros_invalidos),
-        'tasa_validez': tasa_validez,
+        'lineas_validas_count': len(registros_validos),
         'es_vacio': False
     }
     
-    logger.info(f"Validación completada. Tasa: {tasa_validez:.1%}")
+    logger.info(f"Validación completada. Registros válidos para procesar: {len(registros_validos)}")
     context['task_instance'].xcom_push(key='resultado_validacion', value=resultado_validacion)
     
     return resultado_validacion
@@ -176,23 +175,11 @@ def publicar_en_kafka(**context):
     """
     Publica los registros válidos en Kafka Real.
     """
-    resultado_parseo = context['task_instance'].xcom_pull(
-        task_ids='leer_y_parsear_archivo',
-        key='resultado_parseo'
-    )
+    resultado_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    resultado_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion')
+    archivo_real_nombre = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
     
-    resultado_validacion = context['task_instance'].xcom_pull(
-        task_ids='validar_registros',
-        key='resultado_validacion'
-    )
-    
-    archivo_real_nombre = context['task_instance'].xcom_pull(
-        task_ids='leer_y_parsear_archivo',
-        key='archivo_real_nombre'
-    )
-    
-    if not resultado_parseo or not resultado_validacion:
-        return None
+    if not resultado_parseo or not resultado_validacion: return None
 
     if resultado_validacion.get('es_vacio'):
         logger.warning("Archivo vacío. No se enviará nada a Kafka.")
@@ -201,11 +188,11 @@ def publicar_en_kafka(**context):
     registros_validos = resultado_validacion.get('registros_validos', [])
     tabla_destino = resultado_parseo['tabla_destino']
     
+    # Si no hay registros válidos (0), no enviamos nada.
     if not registros_validos:
         logger.warning("No hay registros válidos para Kafka.")
         return None
     
-    # Construcción del Tópico
     tabla_sin_schema = tabla_destino.split('.')[-1].lower()
     kafka_topic = f"{KAFKA_TOPIC_PREFIX}{tabla_sin_schema}"
     
@@ -261,57 +248,55 @@ def mover_archivo(**context):
     """
     Mueve el archivo a /processed/ o /error/ según el resultado.
     """
+    # Recuperamos la ruta REAL encontrada en el paso 1
     archivo_real_nombre = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
     archivo_real_ruta = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_ruta')
     
-    resultado_validacion = context['task_instance'].xcom_pull(
-        task_ids='validar_registros',
-        key='resultado_validacion'
-    )
+    # Consultamos AMBOS resultados para decidir (Parser y Validador)
+    res_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    res_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion')
     
-    if not resultado_validacion:
-        return None
-
-    # Lógica de decisión inteligente
-    es_vacio = resultado_validacion.get('es_vacio', False)
-    tasa_validez = resultado_validacion.get('tasa_validez', 0)
+    # Lógica de Decisión Robusta
+    es_vacio = False
+    cantidad_validos = 0
     
+    if res_parseo and res_parseo.get('es_vacio'):
+        es_vacio = True
+    elif res_validacion:
+        es_vacio = res_validacion.get('es_vacio', False)
+        cantidad_validos = res_validacion.get('lineas_validas_count', 0)
+    
+    # Determinación de Destino
     if es_vacio:
         destino_path = GCP_ERROR_PATH
         estado = 'error_vacio'
-        logger.error("Moviendo archivo VACÍO a carpeta ERROR.")
-    elif tasa_validez < 0.95:
+        logger.error(f"Archivo VACÍO {archivo_real_nombre} -> ERROR")
+    elif cantidad_validos == 0:
+        # Si el archivo NO estaba vacío, pero tiene 0 registros válidos, es un error total de calidad
         destino_path = GCP_ERROR_PATH
-        estado = 'error_calidad'
-        logger.warning(f"Moviendo a ERROR por baja calidad ({tasa_validez:.1%})")
+        estado = 'error_calidad_total'
+        logger.error(f"Moviendo a ERROR (0 registros válidos).")
     else:
+        # Si tiene al menos 1 registro válido, se considera procesado (parcial o total)
         destino_path = GCP_PROCESSED_PATH
         estado = 'procesado'
-        logger.info("Moviendo a PROCESSED (Éxito).")
+        logger.info(f"Moviendo a PROCESSED ({cantidad_validos} registros útiles).")
     
     nombre_base = Path(archivo_real_nombre).stem
     extension = Path(archivo_real_nombre).suffix
     
-    if len(nombre_base) < 20: 
+    if len(nombre_base) < 20 or nombre_base.find('_202') == -1: 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         nuevo_nombre = f"{nombre_base}_{timestamp}{extension}"
     else:
-        nuevo_nombre = f"PROC_{nombre_base}{extension}"
-    
+        nuevo_nombre = f"PROC_{archivo_real_nombre}"
+
     destino_completo = Path(destino_path) / nuevo_nombre
     
     try:
         shutil.move(archivo_real_ruta, str(destino_completo))
-        logger.info(f"Archivo movido exitosamente a: {destino_completo}")
-        
-        resultado = {
-            'archivo_original': archivo_real_nombre,
-            'archivo_destino': nuevo_nombre,
-            'ruta_destino': str(destino_completo),
-            'estado': estado
-        }
-        return resultado
-    
+        logger.info(f"Movido a: {destino_completo}")
+        return {'estado': estado, 'destino': str(destino_completo)}
     except Exception as e:
         logger.error(f"Error moviendo archivo: {e}")
         raise
@@ -330,7 +315,10 @@ def registrar_en_audit_log(**context):
     resultado_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion') or {}
     resultado_kafka = context['task_instance'].xcom_pull(task_ids='publicar_en_kafka', key='resultado_kafka') or {}
     
-    tiempo_inicio = context['execution_date']
+    # Fix fechas
+    tiempo_inicio = context.get('data_interval_start') or context.get('execution_date')
+    if hasattr(tiempo_inicio, '_get_current_object'):
+        tiempo_inicio = tiempo_inicio._get_current_object()
     tiempo_fin = datetime.now(tiempo_inicio.tzinfo)
     
     parametros = {
@@ -339,15 +327,13 @@ def registrar_en_audit_log(**context):
         'dag_run_id': context['dag_run'].run_id
     }
     
+    # JSON plano para el log
     resultado = {
-        'total_lineas': resultado_parseo.get('total_lineas', 0),
-        'lineas_validas': resultado_parseo.get('lineas_validas', 0),
-        'lineas_invalidas': resultado_parseo.get('lineas_invalidas', 0),
-        'registros_publicados': resultado_kafka.get('publicados', 0),
-        'tasa_validez': resultado_validacion.get('tasa_validez', 0)
+        'total': resultado_parseo.get('total_lineas', 0),
+        'validos': resultado_parseo.get('lineas_validas', 0),
+        'publicados': resultado_kafka.get('publicados', 0),
+        'es_vacio': resultado_validacion.get('es_vacio', False)
     }
-    
-    logger.info(f"Registrando en audit_log...")
     
     try:
         pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
@@ -364,9 +350,9 @@ def registrar_en_audit_log(**context):
                 json.dumps({'archivo': archivo_real_nombre})
             )
         )
-        logger.info("Registro en audit_log exitoso")
+        logger.info("Audit Log OK")
     except Exception as e:
-        logger.error(f"Error registrando en audit_log: {e}")
+        logger.error(f"Error Audit: {e}")
     
     return {'registrado': True}
 
@@ -383,47 +369,14 @@ with DAG(
     doc_md=__doc__,
 ) as dag:
     
-    tarea_parsear = PythonOperator(
-        task_id='leer_y_parsear_archivo',
-        python_callable=leer_y_parsear_archivo,
-        provide_context=True
-    )
+    t1 = PythonOperator(task_id='leer_y_parsear_archivo', python_callable=leer_y_parsear_archivo, provide_context=True)
+    t2 = PythonOperator(task_id='validar_registros', python_callable=validar_registros, provide_context=True)
+    t3 = PythonOperator(task_id='publicar_en_kafka', python_callable=publicar_en_kafka, provide_context=True)
+    t4 = PythonOperator(task_id='registrar_errores', python_callable=registrar_errores, provide_context=True, trigger_rule='all_done')
+    t5 = PythonOperator(task_id='mover_archivo', python_callable=mover_archivo, provide_context=True, trigger_rule='all_done')
+    t6 = PythonOperator(task_id='registrar_en_audit_log', python_callable=registrar_en_audit_log, provide_context=True, trigger_rule='all_done')
     
-    tarea_validar = PythonOperator(
-        task_id='validar_registros',
-        python_callable=validar_registros,
-        provide_context=True
-    )
-    
-    tarea_kafka = PythonOperator(
-        task_id='publicar_en_kafka',
-        python_callable=publicar_en_kafka,
-        provide_context=True
-    )
-    
-    tarea_errores = PythonOperator(
-        task_id='registrar_errores',
-        python_callable=registrar_errores,
-        provide_context=True,
-        trigger_rule='all_done'
-    )
-    
-    tarea_mover = PythonOperator(
-        task_id='mover_archivo',
-        python_callable=mover_archivo,
-        provide_context=True,
-        trigger_rule='all_done'
-    )
-    
-    tarea_audit = PythonOperator(
-        task_id='registrar_en_audit_log',
-        python_callable=registrar_en_audit_log,
-        provide_context=True,
-        trigger_rule='all_done'
-    )
-    
-    # Flujo de dependencias
-    tarea_parsear >> tarea_validar >> tarea_kafka >> tarea_errores >> tarea_mover >> tarea_audit
+    t1 >> t2 >> t3 >> t4 >> t5 >> t6
 
 
 dag.doc_md = """

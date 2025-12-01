@@ -82,7 +82,7 @@ class FixedWidthParser:
                         
                         if advertencias:
                             for adv in advertencias:
-                                logger.warning(f"[CASO 2.5][Línea {linea_num}] {adv}")
+                                logger.warning(f"[Línea {linea_num}] {adv}")
                                 
                     except Exception as e:
                         error = {
@@ -91,7 +91,7 @@ class FixedWidthParser:
                             'error': str(e)
                         }
                         errores.append(error)
-                        logger.error(f"[CASO 2.2] Error en línea {linea_num}: {e}")
+                        logger.error(f"Error en línea {linea_num}: {e}")
         
         except Exception as e:
             logger.error(f"Error fatal leyendo archivo {file_path}: {e}")

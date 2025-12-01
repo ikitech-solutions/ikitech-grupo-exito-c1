@@ -15,7 +15,7 @@
     "campos": [
       { "nombre": "COD_PAIS", "start": 0, "end": 4, "required": true },
       { "nombre": "NOMBRE", "start": 4, "end": 34, "required": true },
-      { "nombre": "COD_MON", "start": 34, "end": 36, "required": false }
+      { "nombre": "COD_MON", "start": 34, "end": 36, "required": true }
     ]
   },
   "XCIUDAD.txt": {
@@ -23,10 +23,12 @@
     "encoding": "latin-1",
     "tipo": "fixed",
     "campos": [
-      { "nombre": "CIUDAD", "start": 0, "end": 3, "required": true },
-      { "nombre": "NOMBRE", "start": 3, "end": 33, "required": true },
-      { "nombre": "SUBZONA", "start": 33, "end": 35, "required": false },
-      { "nombre": "CLIMA", "start": 35, "end": 37, "required": false }
+      { "nombre": "COD_PAIS", "start": 0, "end": 3, "required": true },
+      { "nombre": "CIUDAD", "start": 3, "end": 6, "required": true },
+      { "nombre": "NOMBRE", "start": 6, "end": 36, "required": true },
+      { "nombre": "SUBZONA", "start": 36, "end": 38, "required": false },
+      { "nombre": "CLIMA", "start": 38, "end": 40, "required": false },
+      { "nombre": "COD_DANE", "start": 40, "end": 45, "required": false }
     ]
   },
   "XWEDEP.txt": {
@@ -84,7 +86,7 @@
     "campos": [
       { "nombre": "GRUPO", "index": 0, "required": true },
       { "nombre": "CATEGO", "index": 1, "required": true },
-      { "nombre": "NOMBRE", "index": 4, "required": true } 
+      { "nombre": "NOMBRE", "index": 4, "required": true }
     ]
   },
   "XUEN.txt": {
@@ -116,7 +118,7 @@
       { "nombre": "SUBLIN", "index": 6, "required": true },
       { "nombre": "SUBCATEGO", "index": 10, "required": true },
       { "nombre": "SEGMENS", "index": 13, "required": true },
-      { "nombre": "NOMSEGS", "index": 14, "required": true }
+      { "nombre": "NOMSEGS", "index": 14, "required": false }
     ]
   },
   "XMONEDA.txt": {
