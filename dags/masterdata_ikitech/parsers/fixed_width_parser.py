@@ -1,5 +1,5 @@
 """
-Parser genérico para archivos de texto de ancho fijo (fixed-width).
+Parser híbrido para archivos de texto (Fixed-Width y Delimitados).
 
 Este módulo proporciona funciones para parsear archivos de texto donde cada campo
 tiene una posición fija en la línea, basándose en una configuración de layout.
@@ -17,71 +17,73 @@ class FixedWidthParser:
     """Parser para archivos de texto de ancho fijo."""
     
     def __init__(self, layouts_config_path: str):
-        """
-        Inicializa el parser con la configuración de layouts.
-        
-        Args:
-            layouts_config_path: Ruta al archivo JSON con la configuración de layouts
-        """
         self.layouts = self._load_layouts(layouts_config_path)
         logger.info(f"Layouts cargados: {list(self.layouts.keys())}")
     
     def _load_layouts(self, config_path: str) -> Dict[str, Any]:
-        """Carga la configuración de layouts desde un archivo JSON."""
         with open(config_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     
     def get_layout(self, filename: str) -> Optional[Dict[str, Any]]:
-        """
-        Obtiene la configuración de layout para un archivo.
-        
-        Args:
-            filename: Nombre del archivo (ej: 'XWECIA.txt')
-        
-        Returns:
-            Dict con la configuración del layout o None si no se encuentra
-        """
         return self.layouts.get(filename)
     
     def parse_file(self, file_path: str, filename: str) -> Dict[str, Any]:
         """
-        Parsea un archivo completo de texto de ancho fijo.
-        
-        Args:
-            file_path: Ruta completa al archivo
-            filename: Nombre del archivo para identificar el layout
-        
-        Returns:
-            Dict con:
-                - registros: List[Dict] con los registros parseados
-                - errores: List[Dict] con los errores encontrados
-                - total_lineas: int
-                - lineas_validas: int
-                - lineas_invalidas: int
+        Parsea un archivo completo según su configuración.
         """
         layout = self.get_layout(filename)
         if not layout:
             raise ValueError(f"No se encontró configuración de layout para: {filename}")
         
-        encoding = layout.get('encoding', 'utf-8')
+        encoding = layout.get('encoding', 'latin-1')
+        tipo_archivo = layout.get('tipo', 'fixed')
+        delimitador = layout.get('delimitador', '|')
+        ignore_header = layout.get('ignore_header', False)
+        
         registros = []
         errores = []
         linea_num = 0
+        total_lineas_leidas = 0
         
-        logger.info(f"Parseando archivo: {file_path} con encoding: {encoding}")
+        logger.info(f"Parseando archivo: {file_path} con encoding: {encoding} (Tipo: {tipo_archivo})")
         
         try:
             with open(file_path, 'r', encoding=encoding) as f:
-                for linea in f:
-                    linea_num += 1
+                todas_lineas = f.readlines()
+                
+                if not todas_lineas:
+                    return {
+                        'registros': [],
+                        'errores': [],
+                        'total_lineas': 0,
+                        'lineas_validas': 0,
+                        'lineas_invalidas': 0,
+                        'tabla_destino': layout.get('tabla_destino'),
+                        'archivo': filename,
+                        'es_vacio': True
+                    }
+                
+                inicio_lectura = 1 if ignore_header else 0
+                
+                for i, linea in enumerate(todas_lineas[inicio_lectura:], start=inicio_lectura + 1):
+                    linea_num = i
+                    total_lineas_leidas += 1
                     
-                    # Saltar líneas vacías
                     if not linea.strip():
                         continue
                     
                     try:
-                        registro = self.parse_line(linea, layout)
+                        if tipo_archivo == 'delimitado':
+                            registro, advertencias = self._parse_delimited(linea, layout, delimitador)
+                        else:
+                            registro, advertencias = self._parse_fixed(linea, layout)
+                        
                         registros.append(registro)
+                        
+                        if advertencias:
+                            for adv in advertencias:
+                                logger.warning(f"[CASO 2.5][Línea {linea_num}] {adv}")
+                                
                     except Exception as e:
                         error = {
                             'linea_num': linea_num,
@@ -89,97 +91,114 @@ class FixedWidthParser:
                             'error': str(e)
                         }
                         errores.append(error)
-                        logger.warning(f"Error en línea {linea_num}: {e}")
+                        logger.error(f"[CASO 2.2] Error en línea {linea_num}: {e}")
         
         except Exception as e:
-            logger.error(f"Error leyendo archivo {file_path}: {e}")
+            logger.error(f"Error fatal leyendo archivo {file_path}: {e}")
             raise
         
         resultado = {
             'registros': registros,
             'errores': errores,
-            'total_lineas': linea_num,
+            'total_lineas': total_lineas_leidas,
             'lineas_validas': len(registros),
             'lineas_invalidas': len(errores),
             'tabla_destino': layout.get('tabla_destino'),
-            'archivo': filename
+            'archivo': filename,
+            'es_vacio': False
         }
         
         logger.info(f"Parseo completado: {len(registros)} válidos, {len(errores)} errores")
         
         return resultado
     
-    def parse_line(self, linea: str, layout: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Parsea una línea de texto según la configuración de layout.
-        
-        Args:
-            linea: Línea de texto a parsear
-            layout: Dict con la configuración del layout
-        
-        Returns:
-            Dict con los campos parseados
-        """
+    def _parse_fixed(self, linea: str, layout: Dict[str, Any]):
         registro = {}
-        
-        # Agregar campos hardcoded
+        advertencias = []
         campos_hardcoded = layout.get('campos_hardcoded', {})
         for campo, valor in campos_hardcoded.items():
             registro[campo] = valor
         
-        # Parsear campos según configuración
         campos = layout.get('campos', [])
+
+        max_end = max([c.get('end', 0) for c in campos]) if campos else 0
+        
+        linea_util = linea.rstrip('\n').rstrip('\r')
+
+        if len(linea_util) > max_end:
+            contenido_extra = linea_util[max_end:]
+            if contenido_extra.strip(): 
+                advertencias.append(f"Datos no mapeados encontrados después de la posición {max_end}: '{contenido_extra[:20]}...'")
+        # -----------------------------------------------------------
         
         for campo_config in campos:
             nombre = campo_config['nombre']
+            start = campo_config.get('start')
+            end = campo_config.get('end')
             
-            try:
-                # Parseo por posición fija
-                if 'start' in campo_config and 'end' in campo_config:
-                    start = campo_config['start']
-                    end = campo_config['end']
-                    valor = linea[start:end].strip()
+            if start is not None and end is not None:
+                valor = linea[start:end].strip()
                 
-                # Parseo por índice (para archivos delimitados)
-                elif 'index' in campo_config:
-                    # Detectar delimitador (puede ser espacio, tab, pipe, etc.)
-                    partes = linea.split()
-                    index = campo_config['index']
-                    if index < len(partes):
-                        valor = partes[index].strip()
-                    else:
-                        raise ValueError(f"Índice {index} fuera de rango")
-                
-                else:
-                    raise ValueError(f"Configuración inválida para campo {nombre}")
-                
-                # Convertir tipo si es necesario
                 tipo = campo_config.get('tipo', 'string')
                 if tipo == 'numeric' and valor:
-                    valor = int(valor) if valor.isdigit() else float(valor)
+                    try:
+                        valor = int(valor) if valor.isdigit() else float(valor)
+                    except ValueError:
+                        pass 
                 
-                # Validar campo requerido
-                if campo_config.get('required', False) and not valor:
+                if campo_config.get('required', False) and not str(valor):
                     raise ValueError(f"Campo requerido {nombre} está vacío")
                 
                 registro[nombre] = valor
-            
-            except Exception as e:
-                raise ValueError(f"Error parseando campo {nombre}: {e}")
+            else:
+                raise ValueError(f"Configuración inválida para campo {nombre} (fixed)")
         
-        return registro
+        return registro, advertencias
+
+    def _parse_delimited(self, linea: str, layout: Dict[str, Any], delimiter: str):
+        registro = {}
+        advertencias = []
+        campos_hardcoded = layout.get('campos_hardcoded', {})
+        for campo, valor in campos_hardcoded.items():
+            registro[campo] = valor
+            
+        partes = linea.strip().split(delimiter)
+        campos = layout.get('campos', [])
+
+        if len(partes) > len(campos):
+            cols_extra = partes[len(campos):]
+            if any(col.strip() for col in cols_extra):
+                advertencias.append(f"Se encontraron {len(partes)} columnas, pero se esperaban {len(campos)}. Hay datos extra.")
+
+        for campo_config in campos:
+            nombre = campo_config['nombre']
+            index = campo_config.get('index')
+            
+            if index is not None:
+                if index < len(partes):
+                    valor = partes[index].strip()
+                    
+                    tipo = campo_config.get('tipo', 'string')
+                    if tipo == 'numeric' and valor:
+                        try:
+                            valor = int(valor) if valor.isdigit() else float(valor)
+                        except ValueError:
+                            pass
+                    
+                    if campo_config.get('required', False) and not str(valor):
+                        raise ValueError(f"Campo requerido {nombre} está vacío")
+                    
+                    registro[nombre] = valor
+                else:
+                    if campo_config.get('required', False):
+                        raise ValueError(f"Índice {index} fuera de rango para campo requerido {nombre}")
+                    registro[nombre] = None
+            else:
+                raise ValueError(f"Configuración inválida para campo {nombre} (delimitado)")
+                
+        return registro, advertencias
     
     def validate_file_structure(self, file_path: str, filename: str) -> Dict[str, Any]:
-        """
-        Valida la estructura básica de un archivo antes de parsearlo.
-        
-        Args:
-            file_path: Ruta completa al archivo
-            filename: Nombre del archivo
-        
-        Returns:
-            Dict con el resultado de la validación
-        """
         layout = self.get_layout(filename)
         if not layout:
             return {
@@ -188,7 +207,7 @@ class FixedWidthParser:
             }
         
         try:
-            encoding = layout.get('encoding', 'utf-8')
+            encoding = layout.get('encoding', 'latin-1')
             with open(file_path, 'r', encoding=encoding) as f:
                 primera_linea = f.readline()
                 
@@ -196,14 +215,6 @@ class FixedWidthParser:
                     return {
                         'valido': False,
                         'error': "Archivo vacío"
-                    }
-                
-                # Validar longitud mínima (si está configurada)
-                min_length = layout.get('min_line_length')
-                if min_length and len(primera_linea.rstrip('\n')) < min_length:
-                    return {
-                        'valido': False,
-                        'error': f"Línea muy corta. Esperado: >={min_length}, encontrado: {len(primera_linea)}"
                     }
                 
                 return {
@@ -220,22 +231,10 @@ class FixedWidthParser:
 
 
 def parse_fixed_width_file(file_path: str, filename: str, layouts_config_path: str) -> Dict[str, Any]:
-    """
-    Función de conveniencia para parsear un archivo de ancho fijo.
-    
-    Args:
-        file_path: Ruta completa al archivo
-        filename: Nombre del archivo
-        layouts_config_path: Ruta al archivo de configuración de layouts
-    
-    Returns:
-        Dict con los registros parseados y estadísticas
-    """
     parser = FixedWidthParser(layouts_config_path)
     return parser.parse_file(file_path, filename)
 
 
-# Ejemplo de uso
 if __name__ == "__main__":
     import sys
     
@@ -256,6 +255,7 @@ if __name__ == "__main__":
         print(f"  Válidas: {resultado['lineas_validas']}")
         print(f"  Inválidas: {resultado['lineas_invalidas']}")
         print(f"  Tabla destino: {resultado['tabla_destino']}")
+        print(f"  Es vacío: {resultado.get('es_vacio')}")
         
         if resultado['registros']:
             print(f"\nPrimer registro:")

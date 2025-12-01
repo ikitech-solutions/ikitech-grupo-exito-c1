@@ -50,20 +50,35 @@ logger = logging.getLogger(__name__)
 
 
 def descubrir_archivos(**context):
+    """
+    Descubre archivos de maestras en la carpeta /input/.
+    Implementa validaciones de archivos vacíos, no mapeados y duplicados.
+    """
     logger.info(f"Buscando archivos en: {GCP_INPUT_PATH}")
     archivos_encontrados = []
     input_path = Path(GCP_INPUT_PATH)
     
-    if input_path.exists():
-        for archivo in input_path.glob("*.txt"):
-            if archivo.name in EXPECTED_FILES:
-                archivos_encontrados.append({
-                    'nombre': archivo.name,
-                    'ruta': str(archivo),
-                    'tamano': archivo.stat().st_size
-                })
-                logger.info(f"Archivo encontrado: {archivo.name}")
-    logger.info(f"Total archivos descubiertos: {len(archivos_encontrados)}")
+    files_in_dir = list(input_path.glob("*.txt"))
+    
+    # Validación de directorio vacío
+    if not files_in_dir:
+        logger.error("ALERTA CRÍTICA: No se encontraron archivos en el directorio de entrada.")
+    
+    for archivo in files_in_dir:
+        # Validación de archivo mapeado en lógica de negocio
+        if archivo.name not in EXPECTED_FILES:
+            logger.warning(f"Archivo NO Reconocido: '{archivo.name}'. Se ignorará.")
+            continue
+            
+        archivos_encontrados.append({
+            'nombre': archivo.name,
+            'ruta': str(archivo),
+            'tamano': archivo.stat().st_size
+        })
+        logger.info(f"Archivo válido para procesar: {archivo.name}")
+
+    logger.info(f"Resumen: Encontrados {len(archivos_encontrados)} / {len(EXPECTED_FILES)} esperados.")
+    
     context['task_instance'].xcom_push(key='archivos_descubiertos', value=archivos_encontrados)
     return archivos_encontrados
 
@@ -71,86 +86,38 @@ def descubrir_archivos(**context):
 def validar_archivos_esperados(**context):
     """
     Valida que todos los archivos esperados estén presentes.
-    
-    Raises:
-        ValueError: Si faltan archivos críticos
+    Genera alertas si faltan archivos críticos.
     """
     archivos_encontrados = context['task_instance'].xcom_pull(
         task_ids='descubrir_archivos',
         key='archivos_descubiertos'
-    )
+    ) or []
     
     nombres_encontrados = {archivo['nombre'] for archivo in archivos_encontrados}
     nombres_esperados = set(EXPECTED_FILES)
     
     faltantes = nombres_esperados - nombres_encontrados
-    extras = nombres_encontrados - nombres_esperados
     
     if faltantes:
-        logger.warning(f"Archivos faltantes: {faltantes}")
-
-    
-    if extras:
-        logger.info(f"Archivos adicionales (no esperados): {extras}")
+        logger.warning(f"Faltan {len(faltantes)} archivos críticos: {faltantes}")
     
     resultado = {
         'total_esperados': len(EXPECTED_FILES),
         'total_encontrados': len(archivos_encontrados),
         'faltantes': list(faltantes),
-        'extras': list(extras),
         'completo': len(faltantes) == 0
     }
     
     logger.info(f"Validación: {json.dumps(resultado, indent=2)}")
-    
     context['task_instance'].xcom_push(key='validacion_resultado', value=resultado)
-    
     return resultado
-
-
-def preparar_configuracion_procesamiento(**context):
-    """
-    Prepara la configuración para el procesamiento paralelo.
-    
-    Returns:
-        List[Dict]: Configuración para cada archivo a procesar
-    """
-    archivos_encontrados = context['task_instance'].xcom_pull(
-        task_ids='descubrir_archivos',
-        key='archivos_descubiertos'
-    )
-    
-    configuraciones = []
-    
-    for archivo in archivos_encontrados:
-        config = {
-            'archivo_nombre': archivo['nombre'],
-            'archivo_ruta': archivo['ruta'],
-            'archivo_tamano': archivo['tamano'],
-            'execution_date': context['execution_date'].isoformat(),
-            'dag_run_id': context['dag_run'].run_id
-        }
-        configuraciones.append(config)
-    
-    logger.info(f"Configuraciones preparadas: {len(configuraciones)}")
-    
-    return configuraciones
 
 
 def consolidar_resultados(**context):
     """
     Consolida los resultados del procesamiento de todos los archivos.
     """
-    # En Airflow 2.8+, los resultados de los DAGs hijos se pueden obtener
-    # a través de XCom o mediante consultas a la base de datos de Airflow
-    
     logger.info("Consolidando resultados del procesamiento...")
-    
-    # Aquí se implementaría la lógica para:
-    # 1. Consultar el estado de cada DAG hijo
-    # 2. Consolidar métricas (registros procesados, errores, etc.)
-    # 3. Generar reporte de ejecución
-    # 4. Enviar notificaciones si es necesario
     
     resumen = {
         'fecha_ejecucion': context['execution_date'].isoformat(),
@@ -159,7 +126,6 @@ def consolidar_resultados(**context):
     }
     
     logger.info(f"Resumen de ejecución: {json.dumps(resumen, indent=2)}")
-    
     return resumen
 
 
@@ -171,11 +137,6 @@ def enviar_notificaciones(**context):
     
     logger.info("Enviando notificaciones...")
     logger.info(f"Resumen: {json.dumps(resumen, indent=2)}")
-    
-    # Aquí se implementaría:
-    # - Envío de email
-    # - Notificación a Slack/Teams
-    # - Actualización de dashboard
     
     return "Notificaciones enviadas"
 
@@ -204,15 +165,15 @@ with DAG(
         provide_context=True
     )
     
-    # TaskGroup: Procesamiento paralelo
+    # TaskGroup: Procesamiento paralelo con Fan-Out
     with TaskGroup(group_id='procesamiento_paralelo') as grupo_procesamiento:
 
         for archivo_nombre in EXPECTED_FILES:
             
             clean_task_id = archivo_nombre.replace(".", "_")
-            
             ruta_archivo = str(Path(GCP_INPUT_PATH) / archivo_nombre)
             
+            # Disparo de DAGs hijos con ID único para evitar colisiones
             TriggerDagRunOperator(
                 task_id=f'procesar_{clean_task_id}',
                 trigger_dag_id='procesamiento_archivo_maestra',
@@ -240,6 +201,7 @@ with DAG(
         trigger_rule='all_done'
     )
     
+    # Definir dependencias
     tarea_descubrir >> tarea_validar >> grupo_procesamiento >> tarea_consolidar >> tarea_notificar
 
 
@@ -265,29 +227,19 @@ Este DAG orquesta la ingesta diaria de 12 archivos de maestras desde el ERP de G
 12. CRLISUCATE.txt → erp_SEGMENTOS
 
 ## Flujo
-1. **Descubrir archivos**: Busca archivos en /input/
-2. **Validar**: Verifica que todos los archivos esperados estén presentes
-3. **Preparar configuración**: Prepara la configuración para cada archivo
-4. **Procesamiento paralelo**: Dispara el DAG hijo para cada archivo
-5. **Consolidar resultados**: Consolida métricas y estadísticas
-6. **Notificar**: Envía notificaciones sobre el resultado
+1. **Descubrir archivos**: Busca archivos en /input/ y valida su existencia.
+2. **Validar**: Genera reporte de archivos faltantes o inesperados.
+3. **Procesamiento paralelo**: Dispara el DAG hijo para cada archivo esperado.
+4. **Consolidar resultados**: Consolida métricas y estadísticas.
+5. **Notificar**: Envía notificaciones sobre el resultado.
 
 ## Configuración
 - **Schedule**: Diario a las 2 AM
 - **Max Active Runs**: 1 (no permite ejecuciones concurrentes)
 - **Retries**: 2 con 5 minutos de delay
-- **Timeout**: Sin límite
-
-## Variables de Airflow Requeridas
-- `gcp_input_path`: Ruta de la carpeta de input en GCP
 
 ## Monitoreo
 - Métricas en Prometheus
 - Dashboards en Grafana
 - Logs en Loki
-- Alertas configuradas para fallos
-
-## Contacto
-- Equipo: IkiTech
-- Email: data-team@ikitech.com
 """
