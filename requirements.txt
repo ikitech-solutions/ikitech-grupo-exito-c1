@@ -1,4 +1,5 @@
-kafka-python>=2.0.2
-openpyxl>=3.0.10
 apache-airflow-providers-postgres
 apache-airflow-providers-google
+kafka-python>=2.0.2
+openpyxl>=3.0.10
+pandas

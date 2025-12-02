@@ -31,19 +31,9 @@ DEFAULT_ARGS = {
 # Variables de Airflow
 GCP_INPUT_PATH = Variable.get("gcp_input_path", "/input/")
 EXPECTED_FILES = [
-    'XWECIA.txt',
-    'XWEPAI.txt',
-    'XCIUDAD.txt',
-    'XWEDEP.txt',
-    'XLEXSUBL.txt',
-    'XCADENA.txt',
-    'XGEN.txt',
-    'XCATEG.txt',
-    'XLEXSUBC.txt',
-    'XUEN.txt',
-    'XCAN.txt',
-    'CRLISUCATE.txt',
-    'XMONEDA.txt'
+    'XWECIA.txt', 'XWEPAI.txt', 'XCIUDAD.txt', 'XWEDEP.txt',
+    'XLEXSUBL.txt', 'XCADENA.txt', 'XGEN.txt', 'XCATEG.txt',
+    'XLEXSUBC.txt', 'XUEN.txt', 'XCAN.txt', 'CRLISUCATE.txt', 'XMONEDA.txt'
 ]
 
 logger = logging.getLogger(__name__)
@@ -58,15 +48,22 @@ def descubrir_archivos(**context):
     archivos_encontrados = []
     input_path = Path(GCP_INPUT_PATH)
     
+    if not input_path.exists():
+        logger.error(f"El directorio de entrada no existe: {GCP_INPUT_PATH}")
+        return []
+
     files_in_dir = list(input_path.glob("*.txt"))
     
-    # Validación de directorio vacío
+    #Validación de directorio vacío
     if not files_in_dir:
         logger.error("ALERTA CRÍTICA: No se encontraron archivos en el directorio de entrada.")
     
     for archivo in files_in_dir:
-        # Validación de archivo mapeado en lógica de negocio
-        if archivo.name not in EXPECTED_FILES:
+        #Validación de archivo mapeado en lógica de negocio
+        # Nota: Se usa startswith para soportar archivos con timestamp en el nombre si fuera necesario
+        es_esperado = any(archivo.name.startswith(expected.replace('.txt', '')) for expected in EXPECTED_FILES)
+        
+        if not es_esperado:
             logger.warning(f"Archivo NO Reconocido: '{archivo.name}'. Se ignorará.")
             continue
             
@@ -77,7 +74,7 @@ def descubrir_archivos(**context):
         })
         logger.info(f"Archivo válido para procesar: {archivo.name}")
 
-    logger.info(f"Resumen: Encontrados {len(archivos_encontrados)} / {len(EXPECTED_FILES)} esperados.")
+    logger.info(f"Resumen: Encontrados {len(archivos_encontrados)} archivos válidos.")
     
     context['task_instance'].xcom_push(key='archivos_descubiertos', value=archivos_encontrados)
     return archivos_encontrados
@@ -93,13 +90,22 @@ def validar_archivos_esperados(**context):
         key='archivos_descubiertos'
     ) or []
     
-    nombres_encontrados = {archivo['nombre'] for archivo in archivos_encontrados}
+    # Normalizamos nombres para comparar (quitando timestamps si los hubiera para la validación)
+    nombres_encontrados = {f['nombre'] for f in archivos_encontrados}
+    # Simple heurística: verificar si el nombre base está presente
+    nombres_base_encontrados = set()
+    for f in nombres_encontrados:
+        for expected in EXPECTED_FILES:
+            if f.startswith(expected.replace('.txt', '')):
+                nombres_base_encontrados.add(expected)
+
     nombres_esperados = set(EXPECTED_FILES)
-    
-    faltantes = nombres_esperados - nombres_encontrados
+    faltantes = nombres_esperados - nombres_base_encontrados
     
     if faltantes:
         logger.warning(f"Faltan {len(faltantes)} archivos críticos: {faltantes}")
+    else:
+        logger.info("Todos los archivos esperados están presentes.")
     
     resultado = {
         'total_esperados': len(EXPECTED_FILES),
@@ -134,10 +140,8 @@ def enviar_notificaciones(**context):
     Envía notificaciones sobre el resultado de la ejecución.
     """
     resumen = context['task_instance'].xcom_pull(task_ids='consolidar_resultados')
-    
     logger.info("Enviando notificaciones...")
     logger.info(f"Resumen: {json.dumps(resumen, indent=2)}")
-    
     return "Notificaciones enviadas"
 
 
@@ -171,9 +175,10 @@ with DAG(
         for archivo_nombre in EXPECTED_FILES:
             
             clean_task_id = archivo_nombre.replace(".", "_")
+            # Construimos la ruta base, pero el hijo buscará inteligentemente
             ruta_archivo = str(Path(GCP_INPUT_PATH) / archivo_nombre)
             
-            # Disparo de DAGs hijos con ID único para evitar colisiones
+            # Disparo de DAGs hijos con ID único para evitar colisiones (trigger_run_id)
             TriggerDagRunOperator(
                 task_id=f'procesar_{clean_task_id}',
                 trigger_dag_id='procesamiento_archivo_maestra',

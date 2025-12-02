@@ -22,13 +22,6 @@ class DataValidator:
     def validate_record(self, record: Dict[str, Any], validation_rules: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """
         Valida un registro según reglas de validación.
-        
-        Args:
-            record: Dict con los datos del registro
-            validation_rules: Dict con las reglas de validación
-        
-        Returns:
-            Tuple (es_valido, lista_de_errores)
         """
         errores = []
         
@@ -43,7 +36,7 @@ class DataValidator:
         for field, expected_type in field_types.items():
             if field in record and record[field]:
                 if not self._validate_type(record[field], expected_type):
-                    errores.append(f"Campo '{field}' tiene tipo inválido. Esperado: {expected_type}")
+                    errores.append(f"Campo '{field}' ('{record[field]}') tiene tipo inválido. Esperado: {expected_type}")
         
         # Validar rangos numéricos
         numeric_ranges = validation_rules.get('numeric_ranges', {})
@@ -76,6 +69,11 @@ class DataValidator:
         """Valida el tipo de un valor."""
         if expected_type == 'string':
             return isinstance(value, str)
+        
+        elif expected_type == 'string_alpha':
+            return isinstance(value, str) and value.strip().isalpha()
+        # ---------------------------------------------
+
         elif expected_type == 'numeric':
             try:
                 float(value)
@@ -96,18 +94,6 @@ class DataValidator:
     def validate_batch(self, records: List[Dict[str, Any]], validation_rules: Dict[str, Any]) -> Dict[str, Any]:
         """
         Valida un lote de registros.
-        
-        Args:
-            records: Lista de registros a validar
-            validation_rules: Dict con las reglas de validación
-        
-        Returns:
-            Dict con:
-                - registros_validos: List[Dict]
-                - registros_invalidos: List[Dict] con info de errores
-                - total: int
-                - validos: int
-                - invalidos: int
         """
         registros_validos = []
         registros_invalidos = []
@@ -198,6 +184,9 @@ def validate_cadena(record: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Valida un registro de CADENA."""
     rules = {
         'required_fields': ['CODCADE', 'NOMBRE'],
+        'field_types': {
+            'CODCADE': 'string_alpha' 
+        },
         'string_lengths': {
             'CODCADE': 1,
             'NOMBRE': 30
@@ -245,33 +234,3 @@ def get_validator_for_table(table_name: str):
         table_name = table_name.split('.')[-1]
     
     return VALIDATORS.get(table_name)
-
-
-# Ejemplo de uso
-if __name__ == "__main__":
-    # Ejemplo de validación
-    validator = DataValidator()
-    
-    # Registro válido
-    record_valido = {
-        'CODCIA': '01',
-        'NOMBRE': 'GRUPO ÉXITO'
-    }
-    
-    # Registro inválido
-    record_invalido = {
-        'CODCIA': '',  # Vacío
-        'NOMBRE': 'X' * 50  # Muy largo
-    }
-    
-    rules = {
-        'required_fields': ['CODCIA', 'NOMBRE'],
-        'string_lengths': {'NOMBRE': 30}
-    }
-    
-    es_valido, errores = validator.validate_record(record_valido, rules)
-    print(f"Registro válido: {es_valido}")
-    
-    es_valido, errores = validator.validate_record(record_invalido, rules)
-    print(f"Registro inválido: {es_valido}")
-    print(f"Errores: {errores}")
