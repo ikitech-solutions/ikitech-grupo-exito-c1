@@ -25,6 +25,7 @@ import shutil
 from kafka import KafkaProducer
 import hashlib
 import re
+from io import StringIO
 
 from masterdata_ikitech.parsers.fixed_width_parser import FixedWidthParser
 from masterdata_ikitech.validators.validators import DataValidator, get_validator_for_table
@@ -34,7 +35,7 @@ DEFAULT_ARGS = {
     'depends_on_past': False,
     'email_on_failure': True,
     'email_on_retry': False,
-    'retries': 3,
+    'retries': 0,
     'retry_delay': timedelta(minutes=2),
 }
 
@@ -56,7 +57,6 @@ PK_MAPPING = {
     'db_masterdatahub.erp_cadena': ['codcade'],
     'db_masterdatahub.erp_gerencia': ['codcia', 'divis'],
     'db_masterdatahub.erp_categoria': ['codcia', 'sublin', 'catego'],
-    'db_masterdatahub.erp_subcategoria': ['codcia'], 
     'db_masterdatahub.erp_uen': ['codcia', 'depto'],
     'db_masterdatahub.erp_canal': ['canal'],
     'db_masterdatahub.erp_segmentos': ['codcia']
@@ -134,28 +134,46 @@ def leer_y_parsear_archivo(**context):
     if not archivo_nombre_base:
         raise ValueError("Configuración inválida: falta archivo_nombre")
     
+    if not archivo_nombre_base.lower().endswith('.txt'):
+        msg = f"Error Crítico: El parámetro de entrada '{archivo_nombre_base}' no tiene extensión .txt."
+        logger.error(msg)
+        resultado_error = {
+            'registros': [], 'errores': [msg], 'total_lineas': 0, 'lineas_validas': 0,
+            'lineas_invalidas': 0, 'tabla_destino': None, 'archivo': archivo_nombre_base, 
+            'es_vacio': True 
+        }
+        context['task_instance'].xcom_push(key='resultado_parseo', value=resultado_error)
+        return resultado_error
+
     nombre_busqueda = Path(archivo_nombre_base).stem
     input_dir = Path(GCP_INPUT_PATH)
     
-    logger.info(f"Buscando archivo que contenga: {nombre_busqueda} en {input_dir}")
+    logger.info(f"Buscando archivo: {nombre_busqueda} con .txt en {input_dir}")
     
-    archivos_encontrados = list(input_dir.glob(f"{nombre_busqueda}*"))
+    candidatos = list(input_dir.glob(f"{nombre_busqueda}*"))
+    
+    archivos_encontrados = [
+        f for f in candidatos 
+        if f.suffix.lower() == '.txt'
+    ]
     
     if not archivos_encontrados:
-        logger.warning(f"No se encontró ningún archivo que coincida con {nombre_busqueda}. Saltando.")
-        raise AirflowSkipException(f"Archivo no encontrado: {nombre_busqueda}")
+        logger.warning(f"No se encontró ningún archivo .txt válido para {nombre_busqueda}. (Se ignoraron {len(candidatos) - len(archivos_encontrados)} archivos sin extensión correcta).")
+        raise AirflowSkipException(f"Archivo .txt no encontrado: {nombre_busqueda}")
     
     archivo_real = archivos_encontrados[0]
     archivo_ruta = str(archivo_real)
     
-    logger.info(f"Archivo encontrado: {archivo_real.name}")
+    logger.info(f"Archivo encontrado y validado: {archivo_real.name}")
     
+    # Guardamos referencias
     context['task_instance'].xcom_push(key='archivo_real_nombre', value=archivo_real.name)
     context['task_instance'].xcom_push(key='archivo_real_ruta', value=archivo_ruta)
     
     layouts_config_path = str(Path(__file__).resolve().parent / 'config' / 'layouts.json')
     parser = FixedWidthParser(layouts_config_path)
     
+    # Validación de estructura interna
     validacion = parser.validate_file_structure(archivo_ruta, archivo_nombre_base)
     
     if not validacion['valido']:
@@ -289,73 +307,219 @@ def validar_registros(**context):
     context['task_instance'].xcom_push(key='resultado_validacion', value=resultado_validacion)
     return resultado_validacion
 
+def preparar_staging_y_copy(**context):
+
+    logger = logging.getLogger("airflow")
+    ti = context['task_instance']
+
+    # --- XCom INPUTS ---
+    res_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    res_valid = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion')
+
+    if not res_parseo or not res_valid:
+        logger.error("No hay datos para staging.")
+        ti.xcom_push("staging_status", {"ok": False, "error": "sin_datos"})
+        return {"ok": False}
+
+    # Si falló validación → NO hace staging
+    if res_valid.get("error_critico_integridad", False):
+        logger.warning("Validación crítica falló. Staging NO generado.")
+        ti.xcom_push("staging_status", {"ok": False, "error": "validacion_critica"})
+        return {"ok": False}
+
+    registros = res_valid.get("registros_validos", [])
+    if not registros:
+        logger.warning("No hay registros válidos para staging.")
+        ti.xcom_push("staging_status", {"ok": False, "error": "sin_validos"})
+        return {"ok": False}
+
+    # Tabla destino
+    tabla_destino = normalizar_tabla(res_parseo["tabla_destino"].lower())
+    schema_name, table_name = tabla_destino.split('.', 1)
+
+    # Nombres temporales
+    staging_full = f"{schema_name}.stg_{table_name}"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_full = f"{schema_name}.bkp_{table_name}_{timestamp}"
+
+    # Conexión
+    pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+    conn = pg.get_conn()
+    cur = conn.cursor()
+
+    try:
+        logger.info(f"[STAGING] Creando schema si no existe: {schema_name}")
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
+
+        # BACKUP
+        logger.info(f"[BACKUP] Creando backup seguro: {backup_full}")
+        cur.execute(f"CREATE TABLE {backup_full} AS TABLE {tabla_destino};")
+
+        # STAGING
+        logger.info(f"[STAGING] Creando tabla staging: {staging_full}")
+        cur.execute(f"CREATE TABLE IF NOT EXISTS {staging_full} (LIKE {tabla_destino} INCLUDING DEFAULTS INCLUDING GENERATED);")
+        cur.execute(f"TRUNCATE {staging_full};")
+
+        # Normalizar datos
+        registros_norm = [
+            {k.lower(): ("" if v is None else str(v)) for k, v in row.items()}
+            for row in registros
+        ]
+        columnas = list(registros_norm[0].keys())
+
+        # COPY
+        buf = StringIO()
+        for row in registros_norm:
+            buf.write("\t".join(row[c] for c in columnas) + "\n")
+        buf.seek(0)
+
+        logger.info(f"[STAGING] COPY {len(registros_norm)} filas → {staging_full}")
+        cur.execute(f"SET search_path TO {schema_name}, public;")
+        cur.copy_from(buf, f"stg_{table_name}", sep="\t", columns=columnas)
+
+        conn.commit()
+
+        # XCom OUT
+        ti.xcom_push("staging_table", staging_full)
+        ti.xcom_push("backup_table", backup_full)
+        ti.xcom_push("staging_columns", columnas)
+        ti.xcom_push("staging_status", {"ok": True})
+
+        logger.info("[STAGING] Preparación completada OK")
+        return {"ok": True}
+
+    except Exception as e:
+        logger.error(f"[STAGING ERROR] {str(e)}")
+        conn.rollback()
+
+        ti.xcom_push("staging_status", {"ok": False, "error": str(e)})
+        return {"ok": False}
+
+    finally:
+        cur.close()
 
 def cargar_datos_postgres(**context):
-    """
-    Inserta registros usando UPSERT.
-    """
-    resultado_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
-    resultado_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion')
-    
-    if not resultado_parseo or not resultado_validacion:
-        return None
-    if resultado_validacion.get('es_vacio') or resultado_validacion.get('error_critico_integridad'):
-        logger.info("Inserción a Postgres cancelada por validación.")
-        return None
-    
-    registros = resultado_validacion.get('registros_validos', [])
-    
-    tabla_destino = normalizar_tabla(resultado_parseo['tabla_destino'].lower()) 
-    pks = PK_MAPPING.get(tabla_destino)
-    
-    if not registros:
-        logger.info("No hay registros válidos para insertar.")
-        return
-    
-    registros_min = []
-    for reg in registros:
-        registros_min.append({k.lower(): v for k, v in reg.items()})
-        
-    logger.info(f"Iniciando UPSERT de {len(registros)} filas en {tabla_destino}")
-    
-    pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-    
+
+    logger = logging.getLogger("airflow")
+    ti = context['task_instance']
+
+    # Estatus de staging
+    staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
+    if not staging_status.get("ok", False):
+        logger.warning("[POSTGRES] Swap cancelado: staging/copy falló.")
+        ti.xcom_push('postgres_swap_status', {'ok': False, 'reason': 'staging_failed'})
+        return {'ok': False}
+
+    # Datos del parseo
+    res_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    tabla_destino = normalizar_tabla(res_parseo["tabla_destino"].lower())
+
+    staging = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_table')
+    backup_table = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='backup_table')
+    columnas = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_columns')
+
+    if not staging or not backup_table or not columnas:
+        logger.error("[POSTGRES] Información de staging/backup incompleta.")
+        ti.xcom_push('postgres_swap_status', {'ok': False, 'reason': 'missing_info'})
+        return {'ok': False}
+
+    col_str = ", ".join(columnas)
+
+    # Conexión
+    pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+    conn = pg.get_conn()
+    cur = conn.cursor()
+
+    swap_ok = False
+
     try:
-        if not pks:
-            detected_pks = obtener_pk(pg_hook, tabla_destino)
-            if detected_pks:
-                pks = [c.lower() for c in detected_pks]
-            else:
-                asegurar_columna_hash_e_indice(pg_hook, tabla_destino)
-                pks = ['_record_hash']
-                # Añadir hash a cada registro
-                for r in registros_min:
-                    s = json.dumps({k: r.get(k) for k in sorted(r.keys())}, ensure_ascii=False, sort_keys=True)
-                    r['_record_hash'] = hashlib.sha256(s.encode('utf-8')).hexdigest()
+        logger.info(f"[POSTGRES] Iniciando Transacción de SWAP en {tabla_destino}")
+
+        cur.execute("BEGIN;")
+        cur.execute(f"LOCK TABLE {tabla_destino} IN ACCESS EXCLUSIVE MODE;")
         
-        # Determinar target_fields de forma determinista
-        target_fields = list(registros_min[0].keys())
-        rows = [[r.get(f) for f in target_fields] for r in registros_min]
-        
-        pg_hook.insert_rows(
-            table=tabla_destino,
-            rows=rows,
-            target_fields=target_fields,
-            commit_every=1000,
-            replace=True,        
-            replace_index=pks    
+        # --- LOG NUEVO PARA VER EL TRUNCATE ---
+        logger.info(f"[POSTGRES CRITICAL] Ejecutando TRUNCATE de tabla productiva: {tabla_destino}")
+        cur.execute(f"TRUNCATE {tabla_destino};")
+
+        # --- CARGA REAL ---
+        logger.info(f"[POSTGRES] INSERT FROM {staging} → {tabla_destino}")
+        cur.execute(
+                f"INSERT INTO {tabla_destino} ({col_str}) "
+                f"SELECT {col_str} FROM {staging};"
         )
-        logger.info(f"[BD SUCCESS] Carga/Actualización completada en {tabla_destino}.")
+        
+        # PRUEBA FORZADA DEL ROLLBACK (activar para pruebas)
+        
+        #logger.info("[TEST] Forzando error para probar rollback...")
+        #cur.execute("SELECT * FROM tabla_que_no_existe;")
+
+        cur.execute("COMMIT;")
+        swap_ok = True
+        logger.info("[POSTGRES] Swap completado correctamente")
+
+        ti.xcom_push('postgres_swap_status', {'ok': True})
+
     except Exception as e:
-        logger.error(f"Error crítico insertando en BD: {e}")
-        raise
+        logger.error(f"[POSTGRES ERROR] {str(e)}")
+        conn.rollback()
+
+        logger.info("[ROLLBACK] Restaurando destino desde backup de emergencia")
+
+        try:
+            cur.execute(f"TRUNCATE {tabla_destino};")
+            cur.execute(f"INSERT INTO {tabla_destino} SELECT * FROM {backup_table};")
+            conn.commit()
+            logger.info("[ROLLBACK] Restauración completada.")
+        except Exception as e2:
+            logger.error(f"[ROLLBACK FATAL] No se pudo restaurar backup: {str(e2)}")
+
+        ti.xcom_push('postgres_swap_status', {'ok': False, 'error': str(e)})
+
+    finally:
+        # --- CLEANUP DE STAGING Y BACKUP ---
+        try:
+            if staging:
+                logger.info(f"[CLEANUP] Eliminando staging {staging}")
+                cur.execute(f"DROP TABLE IF EXISTS {staging};")
+        except Exception as e:
+            logger.error(f"[CLEANUP ERROR] No se pudo eliminar staging: {str(e)}")
+
+        try:
+            if backup_table:
+                logger.info(f"[CLEANUP] Eliminando backup {backup_table}")
+                cur.execute(f"DROP TABLE IF EXISTS {backup_table};")
+        except Exception as e:
+            logger.error(f"[CLEANUP ERROR] No se pudo eliminar backup: {str(e)}")
+
+        conn.commit()
+        cur.close()
+
+    return {'ok': swap_ok}
 
 
 def publicar_en_kafka(**context):
-    resultado_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
-    resultado_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion')
-    archivo_real_nombre = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
-    
+    ti = context['task_instance']
+
+    resultado_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    resultado_validacion = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion')
+    archivo_real_nombre = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
+
+    staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
+    postgres_status = ti.xcom_pull(task_ids='cargar_datos_postgres', key='postgres_swap_status') or {}
+
+    # Si staging falló → NO Kafka
+    if not staging_status.get("ok", True):
+        logger.warning("Publicación a Kafka cancelada porque staging/copy falló.")
+        ti.xcom_push('resultado_kafka', {'publicados': 0, 'motivo': 'staging_failed'})
+        return None
+
+    # Si el swap falló → NO Kafka
+    if postgres_status and not postgres_status.get("ok", True):
+        logger.warning("Publicación a Kafka cancelada porque swap en Postgres falló.")
+        ti.xcom_push('resultado_kafka', {'publicados': 0, 'motivo': 'postgres_failed'})
+        return None
+
     if not resultado_parseo or not resultado_validacion:
         return None
     if resultado_validacion.get('es_vacio'):
@@ -366,15 +530,15 @@ def publicar_en_kafka(**context):
 
     registros_validos = resultado_validacion.get('registros_validos', [])
     tabla_destino = resultado_parseo['tabla_destino']
-    
+
     if not registros_validos:
         return None
-    
+
     tabla_sin_schema = tabla_destino.split('.')[-1].lower()
     kafka_topic = f"{KAFKA_TOPIC_PREFIX}{tabla_sin_schema}"
-    
+
     logger.info(f"Enviando a {KAFKA_BOOTSTRAP_SERVERS}. Topic: {kafka_topic}")
-    
+
     try:
         producer = KafkaProducer(
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
@@ -386,11 +550,15 @@ def publicar_en_kafka(**context):
             producer.send(kafka_topic, value=reg)
         producer.flush()
         producer.close()
-        
+
         logger.info(f"Envío a Kafka exitoso. {len(registros_validos)} mensajes.")
-        
-        resultado = {'topic': kafka_topic, 'publicados': len(registros_validos), 'archivo': archivo_real_nombre}
-        context['task_instance'].xcom_push(key='resultado_kafka', value=resultado)
+
+        resultado = {
+            'topic': kafka_topic,
+            'publicados': len(registros_validos),
+            'archivo': archivo_real_nombre
+        }
+        ti.xcom_push(key='resultado_kafka', value=resultado)
         return resultado
     except Exception as e:
         logger.error(f"[ERROR KAFKA] {e}")
@@ -406,25 +574,47 @@ def registrar_errores(**context):
 
 
 def mover_archivo(**context):
-    archivo_real_nombre = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
-    archivo_real_ruta = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_ruta')
-    res_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
-    res_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion')
-    
-    if not archivo_real_nombre or not archivo_real_ruta: return None
+    ti = context['task_instance']
+
+    staging_status = ti.xcom_pull(
+        task_ids='preparar_staging_y_copy',
+        key='staging_status'
+    ) or {}
+
+    postgres_status = ti.xcom_pull(
+        task_ids='cargar_datos_postgres',
+        key='postgres_swap_status'
+    ) or {}
+
+    archivo_real_nombre = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
+    archivo_real_ruta = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_ruta')
+    res_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo') or {}
+    res_validacion = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion') or {}
+
+    if not archivo_real_nombre or not archivo_real_ruta:
+        return None
 
     es_vacio = res_parseo.get('es_vacio', False)
-    cantidad_validos = res_validacion.get('lineas_validas_count', 0) if res_validacion else 0
-    error_integridad = res_validacion.get('error_critico_integridad', False) if res_validacion else False
-    
-    if es_vacio:
+    cantidad_validos = res_validacion.get('lineas_validas_count', 0)
+    error_integridad = res_validacion.get('error_critico_integridad', False)
+
+    # --- PRIORIDAD DE ERRORES ---
+    if not staging_status.get("ok", True):
+        destino_path = GCP_ERROR_PATH
+        estado = 'error_staging'
+        logger.error(f"STAGING/COPY falló para {archivo_real_nombre} -> ERROR")
+    elif postgres_status and not postgres_status.get("ok", True):
+        destino_path = GCP_ERROR_PATH
+        estado = 'error_postgres_swap'
+        logger.error(f"Swap Postgres falló para {archivo_real_nombre} -> ERROR")
+    elif es_vacio:
         destino_path = GCP_ERROR_PATH
         estado = 'error_vacio'
         logger.error(f"Archivo VACÍO {archivo_real_nombre} -> ERROR")
     elif error_integridad:
         destino_path = GCP_ERROR_PATH
         estado = 'error_integridad_duplicados'
-        logger.error(f"Archivo con DUPLICADOS -> ERROR")
+        logger.error(f"Archivo con DUPLICADOS {archivo_real_nombre} -> ERROR")
     elif cantidad_validos == 0:
         destino_path = GCP_ERROR_PATH
         estado = 'error_calidad_total'
@@ -433,77 +623,112 @@ def mover_archivo(**context):
         destino_path = GCP_PROCESSED_PATH
         estado = 'procesado'
         logger.info(f"Moviendo a PROCESSED ({cantidad_validos} registros útiles).")
-    
+
     nombre_base = Path(archivo_real_nombre).stem
     extension = Path(archivo_real_nombre).suffix
-    # Restauré la lógica original con timestamp si el nombre base es corto o no contiene año
-    if len(nombre_base) < 20 or nombre_base.find('_202') == -1: 
+
+    if len(nombre_base) < 20 or nombre_base.find('_202') == -1:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         nuevo_nombre = f"{nombre_base}_{timestamp}{extension}"
     else:
         nuevo_nombre = f"PROC_{archivo_real_nombre}"
 
     destino_completo = Path(destino_path) / nuevo_nombre
-    
+
     try:
         shutil.move(archivo_real_ruta, str(destino_completo))
         logger.info(f"Movido a: {destino_completo}")
         return {'estado': estado}
     except Exception as e:
         logger.error(f"Error moviendo: {e}")
-        raise
+        # Si quieres que NUNCA marque rojo, no hagas raise aquí:
+        # raise
+        return {'estado': 'error_move', 'error': str(e)}
 
 
 def registrar_en_audit_log(**context):
-    archivo_real_nombre = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
-    resultado_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    ti = context['task_instance']
+    
+    archivo_real_nombre = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
+    resultado_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    
     if not resultado_parseo: return {'registrado': False}
-    
-    resultado_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion') or {}
-    resultado_kafka = context['task_instance'].xcom_pull(task_ids='publicar_en_kafka', key='resultado_kafka') or {}
-    
+
+    resultado_validacion = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion') or {}
+    resultado_kafka = ti.xcom_pull(task_ids='publicar_en_kafka', key='resultado_kafka') or {}
+    staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
+    postgres_status = ti.xcom_pull(task_ids='cargar_datos_postgres', key='postgres_swap_status') or {}
+
     tiempo_inicio = context.get('data_interval_start') or context.get('execution_date')
-    if hasattr(tiempo_inicio, '_get_current_object'): tiempo_inicio = tiempo_inicio._get_current_object()
+    if hasattr(tiempo_inicio, '_get_current_object'):
+        tiempo_inicio = tiempo_inicio._get_current_object()
     tiempo_fin = datetime.now(tiempo_inicio.tzinfo)
-    
-    parametros = {'archivo': archivo_real_nombre, 'tabla': resultado_parseo.get('tabla_destino'), 'run': context['dag_run'].run_id}
-    
+
     status_final = 'OK'
-    if resultado_validacion.get('error_critico_integridad'): status_final = 'ERROR_DUPLICADOS'
-    elif resultado_validacion.get('es_vacio'): status_final = 'ERROR_VACIO'
+    error_detalle = None
+
+    if staging_status and not staging_status.get('ok', True):
+        status_final = 'ERROR_STAGING'
+        error_detalle = staging_status.get('error')
+    elif postgres_status and not postgres_status.get('ok', True):
+        status_final = 'ERROR_POSTGRES'
+        error_detalle = postgres_status.get('error') or postgres_status.get('reason')
+    elif resultado_validacion.get('error_critico_integridad'):
+        status_final = 'ERROR_DUPLICADOS'
+    elif resultado_validacion.get('es_vacio'):
+        status_final = 'ERROR_VACIO'
+
+    parametros = json.dumps({
+        'archivo': archivo_real_nombre,
+        'tabla': resultado_parseo.get('tabla_destino'),
+        'run': context['dag_run'].run_id
+    })
     
-    resultado = {
+    info_adicional = json.dumps({'file': archivo_real_nombre})
+
+    resultado_json = json.dumps({
         'total': resultado_parseo.get('total_lineas', 0),
         'validos': resultado_validacion.get('lineas_validas_count', 0),
         'publicados': resultado_kafka.get('publicados', 0),
         'status': status_final
-    }
-    
+    })
+
     try:
         pg_hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         conn = pg_hook.get_conn()
         cursor = conn.cursor()
 
-        cursor.callproc(
-            "db_masterdatahub.sp_registrar_logs",
-            (
-                'procesamiento_archivo_maestra',
-                tiempo_inicio,
-                tiempo_fin,
-                status_final,
-                None,
-                json.dumps(parametros),
-                json.dumps(resultado),
-                json.dumps({'file': archivo_real_nombre})
+        # Agregamos ::timestamp y ::jsonb para que coincida con la firma del SP
+        sql_call = """
+            CALL db_masterdatahub.sp_registrar_logs(
+                %s::text, 
+                %s::timestamp, 
+                %s::timestamp, 
+                %s::text, 
+                %s::text, 
+                %s::jsonb, 
+                %s::jsonb, 
+                %s::jsonb
             )
-        )
+        """
+        
+        cursor.execute(sql_call, (
+            'procesamiento_archivo_maestra',  # 1. text
+            tiempo_inicio,                    # 2. timestamp
+            tiempo_fin,                       # 3. timestamp
+            status_final,                     # 4. text
+            error_detalle,                    # 5. text
+            parametros,                       # 6. jsonb
+            resultado_json,                   # 7. jsonb
+            info_adicional                    # 8. jsonb
+        ))
 
         conn.commit()
         cursor.close()
-        logger.info("Audit Log OK")
+        logger.info(f"Audit Log registrado correctamente. Estado: {status_final}")
 
     except Exception as e:
-        logger.error(f"Error Audit: {e}")
+        logger.error(f"Error llamando a SP Audit: {e}")
     
     return {'registrado': True}
 
@@ -519,10 +744,11 @@ with DAG(
     
     t1 = PythonOperator(task_id='leer_y_parsear_archivo', python_callable=leer_y_parsear_archivo, provide_context=True)
     t2 = PythonOperator(task_id='validar_registros', python_callable=validar_registros, provide_context=True)
-    t3 = PythonOperator(task_id='cargar_datos_postgres', python_callable=cargar_datos_postgres, provide_context=True)
+    t3_pre = PythonOperator(task_id='preparar_staging_y_copy',python_callable=preparar_staging_y_copy,provide_context=True)
+    t3 = PythonOperator(task_id='cargar_datos_postgres',python_callable=cargar_datos_postgres,provide_context=True)
     t4 = PythonOperator(task_id='publicar_en_kafka', python_callable=publicar_en_kafka, provide_context=True)
     t5 = PythonOperator(task_id='registrar_errores', python_callable=registrar_errores, provide_context=True, trigger_rule='all_done')
     t6 = PythonOperator(task_id='mover_archivo', python_callable=mover_archivo, provide_context=True, trigger_rule='all_done')
     t7 = PythonOperator(task_id='registrar_en_audit_log', python_callable=registrar_en_audit_log, provide_context=True, trigger_rule='all_done')
     
-    t1 >> t2 >> t3 >> t4 >> t5 >> t6 >> t7
+    t1 >> t2 >> t3_pre >> t3 >> t4 >> t5 >> t6 >> t7

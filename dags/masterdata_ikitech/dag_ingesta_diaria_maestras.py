@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 
 def descubrir_archivos(**context):
     """
-    Descubre archivos de maestras en la carpeta /input/.
-    Implementa validaciones de archivos vacíos, no mapeados y duplicados.
+    Descubre archivos en /input/.
+    Valida extensión .txt y lista de esperados.
     """
     logger.info(f"Buscando archivos en: {GCP_INPUT_PATH}")
     archivos_encontrados = []
@@ -52,29 +52,40 @@ def descubrir_archivos(**context):
         logger.error(f"El directorio de entrada no existe: {GCP_INPUT_PATH}")
         return []
 
-    files_in_dir = list(input_path.glob("*.txt"))
+    files_in_dir = list(input_path.glob("*"))
     
-    #Validación de directorio vacío
     if not files_in_dir:
         logger.error("ALERTA CRÍTICA: No se encontraron archivos en el directorio de entrada.")
     
     for archivo in files_in_dir:
-        #Validación de archivo mapeado en lógica de negocio
-        # Nota: Se usa startswith para soportar archivos con timestamp en el nombre si fuera necesario
-        es_esperado = any(archivo.name.startswith(expected.replace('.txt', '')) for expected in EXPECTED_FILES)
+        nombre_real = archivo.name
+        
+        # --- VALIDACIÓN DE EXTENSIÓN ESTRICTA ---
+        if archivo.suffix.lower() != '.txt':
+            logger.warning(f"[RECHAZADO] El archivo '{nombre_real}' no tiene extensión .txt. Se ignorará.")
+            continue
+        
+        # --- VALIDACIÓN DE NOMBRE ESPERADO ---
+        es_esperado = False
+        for expected in EXPECTED_FILES:
+            nombre_base_esperado = expected.replace('.txt', '')
+            
+            if nombre_real.startswith(nombre_base_esperado):
+                es_esperado = True
+                break
         
         if not es_esperado:
-            logger.warning(f"Archivo NO Reconocido: '{archivo.name}'. Se ignorará.")
+            logger.warning(f"[OMITIDO] Archivo desconocido: '{nombre_real}'. No está en la lista de configuración.")
             continue
             
         archivos_encontrados.append({
-            'nombre': archivo.name,
+            'nombre': nombre_real,
             'ruta': str(archivo),
             'tamano': archivo.stat().st_size
         })
-        logger.info(f"Archivo válido para procesar: {archivo.name}")
+        logger.info(f"[ACEPTADO] Archivo válido: {nombre_real}")
 
-    logger.info(f"Resumen: Encontrados {len(archivos_encontrados)} archivos válidos.")
+    logger.info(f"Resumen: {len(archivos_encontrados)} archivos válidos enviados a procesar.")
     
     context['task_instance'].xcom_push(key='archivos_descubiertos', value=archivos_encontrados)
     return archivos_encontrados
