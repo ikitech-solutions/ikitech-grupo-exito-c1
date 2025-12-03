@@ -312,7 +312,6 @@ def preparar_staging_y_copy(**context):
     logger = logging.getLogger("airflow")
     ti = context['task_instance']
 
-    # --- XCom INPUTS ---
     res_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
     res_valid = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion')
 
@@ -321,7 +320,6 @@ def preparar_staging_y_copy(**context):
         ti.xcom_push("staging_status", {"ok": False, "error": "sin_datos"})
         return {"ok": False}
 
-    # Si falló validación → NO hace staging
     if res_valid.get("error_critico_integridad", False):
         logger.warning("Validación crítica falló. Staging NO generado.")
         ti.xcom_push("staging_status", {"ok": False, "error": "validacion_critica"})
@@ -333,41 +331,36 @@ def preparar_staging_y_copy(**context):
         ti.xcom_push("staging_status", {"ok": False, "error": "sin_validos"})
         return {"ok": False}
 
-    # Tabla destino
     tabla_destino = normalizar_tabla(res_parseo["tabla_destino"].lower())
     schema_name, table_name = tabla_destino.split('.', 1)
 
-    # Nombres temporales
     staging_full = f"{schema_name}.stg_{table_name}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_full = f"{schema_name}.bkp_{table_name}_{timestamp}"
 
-    # Conexión
     pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
     conn = pg.get_conn()
     cur = conn.cursor()
 
     try:
-        logger.info(f"[STAGING] Creando schema si no existe: {schema_name}")
-        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
-
         # BACKUP
         logger.info(f"[BACKUP] Creando backup seguro: {backup_full}")
         cur.execute(f"CREATE TABLE {backup_full} AS TABLE {tabla_destino};")
 
         # STAGING
         logger.info(f"[STAGING] Creando tabla staging: {staging_full}")
-        cur.execute(f"CREATE TABLE IF NOT EXISTS {staging_full} (LIKE {tabla_destino} INCLUDING DEFAULTS INCLUDING GENERATED);")
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {staging_full} "
+            f"(LIKE {tabla_destino} INCLUDING DEFAULTS INCLUDING GENERATED);"
+        )
         cur.execute(f"TRUNCATE {staging_full};")
 
-        # Normalizar datos
         registros_norm = [
             {k.lower(): ("" if v is None else str(v)) for k, v in row.items()}
             for row in registros
         ]
         columnas = list(registros_norm[0].keys())
 
-        # COPY
         buf = StringIO()
         for row in registros_norm:
             buf.write("\t".join(row[c] for c in columnas) + "\n")
@@ -379,7 +372,6 @@ def preparar_staging_y_copy(**context):
 
         conn.commit()
 
-        # XCom OUT
         ti.xcom_push("staging_table", staging_full)
         ti.xcom_push("backup_table", backup_full)
         ti.xcom_push("staging_columns", columnas)
@@ -391,7 +383,6 @@ def preparar_staging_y_copy(**context):
     except Exception as e:
         logger.error(f"[STAGING ERROR] {str(e)}")
         conn.rollback()
-
         ti.xcom_push("staging_status", {"ok": False, "error": str(e)})
         return {"ok": False}
 
@@ -403,10 +394,10 @@ def cargar_datos_postgres(**context):
     logger = logging.getLogger("airflow")
     ti = context['task_instance']
 
-    # Estatus de staging
+    # Validación previa: staging debe haber sido exitoso
     staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
     if not staging_status.get("ok", False):
-        logger.warning("[POSTGRES] Swap cancelado: staging/copy falló.")
+        logger.warning("[POSTGRES] Swap cancelado: staging falló.")
         ti.xcom_push('postgres_swap_status', {'ok': False, 'reason': 'staging_failed'})
         return {'ok': False}
 
@@ -415,12 +406,11 @@ def cargar_datos_postgres(**context):
     tabla_destino = normalizar_tabla(res_parseo["tabla_destino"].lower())
 
     staging = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_table')
-    backup_table = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='backup_table')
     columnas = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_columns')
 
-    if not staging or not backup_table or not columnas:
-        logger.error("[POSTGRES] Información de staging/backup incompleta.")
-        ti.xcom_push('postgres_swap_status', {'ok': False, 'reason': 'missing_info'})
+    if not staging or not columnas:
+        logger.error("[POSTGRES] Información de staging incompleta.")
+        ti.xcom_push('postgres_swap_status', {'ok': False, 'reason': 'missing_staging'})
         return {'ok': False}
 
     col_str = ", ".join(columnas)
@@ -430,67 +420,51 @@ def cargar_datos_postgres(**context):
     conn = pg.get_conn()
     cur = conn.cursor()
 
-    swap_ok = False
-
     try:
-        logger.info(f"[POSTGRES] Iniciando Transacción de SWAP en {tabla_destino}")
+        logger.info(f"[POSTGRES] Iniciando transacción atómica de SWAP en {tabla_destino}")
 
         cur.execute("BEGIN;")
         cur.execute(f"LOCK TABLE {tabla_destino} IN ACCESS EXCLUSIVE MODE;")
-        
-        # --- LOG NUEVO PARA VER EL TRUNCATE ---
-        logger.info(f"[POSTGRES CRITICAL] Ejecutando TRUNCATE de tabla productiva: {tabla_destino}")
+
+        #TRUNCATE dentro de la transacción (rollback-safe)
+        logger.info(f"[POSTGRES] TRUNCATE productivo → {tabla_destino}")
         cur.execute(f"TRUNCATE {tabla_destino};")
 
-        # --- CARGA REAL ---
-        logger.info(f"[POSTGRES] INSERT FROM {staging} → {tabla_destino}")
-        cur.execute(
-                f"INSERT INTO {tabla_destino} ({col_str}) "
-                f"SELECT {col_str} FROM {staging};"
-        )
+        #Carga real
+        #logger.info(f"[POSTGRES] INSERT desde staging → {tabla_destino}")
+        #cur.execute(
+        #    f"INSERT INTO {tabla_destino} ({col_str}) "
+        #    f"SELECT {col_str} FROM {staging};"
+        #)
         
         # PRUEBA FORZADA DEL ROLLBACK (activar para pruebas)
         
-        #logger.info("[TEST] Forzando error para probar rollback...")
-        #cur.execute("SELECT * FROM tabla_que_no_existe;")
+        logger.info("[TEST] Forzando error para probar rollback...")
+        cur.execute("SELECT * FROM tabla_que_no_existe;")
 
+        #Commit atómico
         cur.execute("COMMIT;")
-        swap_ok = True
         logger.info("[POSTGRES] Swap completado correctamente")
 
         ti.xcom_push('postgres_swap_status', {'ok': True})
+        swap_ok = True
 
     except Exception as e:
         logger.error(f"[POSTGRES ERROR] {str(e)}")
         conn.rollback()
 
-        logger.info("[ROLLBACK] Restaurando destino desde backup de emergencia")
-
-        try:
-            cur.execute(f"TRUNCATE {tabla_destino};")
-            cur.execute(f"INSERT INTO {tabla_destino} SELECT * FROM {backup_table};")
-            conn.commit()
-            logger.info("[ROLLBACK] Restauración completada.")
-        except Exception as e2:
-            logger.error(f"[ROLLBACK FATAL] No se pudo restaurar backup: {str(e2)}")
-
+        logger.error("[POSTGRES] ROLLBACK ejecutado. Tabla productiva restaurada automáticamente.")
         ti.xcom_push('postgres_swap_status', {'ok': False, 'error': str(e)})
+        swap_ok = False
 
     finally:
-        # --- CLEANUP DE STAGING Y BACKUP ---
+        # Cleanup
         try:
             if staging:
                 logger.info(f"[CLEANUP] Eliminando staging {staging}")
                 cur.execute(f"DROP TABLE IF EXISTS {staging};")
         except Exception as e:
-            logger.error(f"[CLEANUP ERROR] No se pudo eliminar staging: {str(e)}")
-
-        try:
-            if backup_table:
-                logger.info(f"[CLEANUP] Eliminando backup {backup_table}")
-                cur.execute(f"DROP TABLE IF EXISTS {backup_table};")
-        except Exception as e:
-            logger.error(f"[CLEANUP ERROR] No se pudo eliminar backup: {str(e)}")
+            logger.error(f"[CLEANUP ERROR] {str(e)}")
 
         conn.commit()
         cur.close()
@@ -498,9 +472,11 @@ def cargar_datos_postgres(**context):
     return {'ok': swap_ok}
 
 
+
 def publicar_en_kafka(**context):
     ti = context['task_instance']
 
+    # --- Recuperación de Datos y Estados ---
     resultado_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
     resultado_validacion = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion')
     archivo_real_nombre = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
@@ -508,50 +484,74 @@ def publicar_en_kafka(**context):
     staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
     postgres_status = ti.xcom_pull(task_ids='cargar_datos_postgres', key='postgres_swap_status') or {}
 
-    # Si staging falló → NO Kafka
+    # --- Validaciones de Flujo (Circuit Breakers) ---
     if not staging_status.get("ok", True):
         logger.warning("Publicación a Kafka cancelada porque staging/copy falló.")
         ti.xcom_push('resultado_kafka', {'publicados': 0, 'motivo': 'staging_failed'})
         return None
 
-    # Si el swap falló → NO Kafka
+    # Si el swap en Postgres falló -> NO Kafka
     if postgres_status and not postgres_status.get("ok", True):
         logger.warning("Publicación a Kafka cancelada porque swap en Postgres falló.")
         ti.xcom_push('resultado_kafka', {'publicados': 0, 'motivo': 'postgres_failed'})
         return None
 
+    # Si no hay datos o la validación falló
     if not resultado_parseo or not resultado_validacion:
         return None
     if resultado_validacion.get('es_vacio'):
         return None
     if resultado_validacion.get('error_critico_integridad'):
-        logger.info("Publicación a Kafka cancelada por validación.")
+        logger.info("Publicación a Kafka cancelada por validación de integridad.")
         return None
 
     registros_validos = resultado_validacion.get('registros_validos', [])
-    tabla_destino = resultado_parseo['tabla_destino']
+    tabla_destino = resultado_parseo['tabla_destino'] # Ejemplo: db_masterdatahub.erp_compania
 
     if not registros_validos:
+        logger.info("No hay registros válidos para publicar.")
         return None
 
-    tabla_sin_schema = tabla_destino.split('.')[-1].lower()
-    kafka_topic = f"{KAFKA_TOPIC_PREFIX}{tabla_sin_schema}"
+    # --- Construcción del Tópico ---
+    kafka_prefix = Variable.get("kafka_topic_prefix", "maestras.erp.") 
+    
+    nombre_tabla_limpio = tabla_destino.split('.')[-1].lower().replace('erp_', '')
+    
+    kafka_topic = f"{kafka_prefix}{nombre_tabla_limpio}"
 
-    logger.info(f"Enviando a {KAFKA_BOOTSTRAP_SERVERS}. Topic: {kafka_topic}")
+    logger.info(f"Enviando a {KAFKA_BOOTSTRAP_SERVERS}. Topic calculado: {kafka_topic}")
 
+    # --- Envío de Mensajes ---
     try:
         producer = KafkaProducer(
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            key_serializer=lambda k: str(k).encode('utf-8'),
             value_serializer=lambda v: json.dumps(v).encode('utf-8'),
             api_version=(0, 10, 2),
             client_id='airflow-producer'
         )
+
+        # Obtenemos las PKs para construir la Key del mensaje (Vital para Log Compaction)
+        pks = PK_MAPPING.get(normalizar_tabla(tabla_destino), [])
+
         for reg in registros_validos:
-            producer.send(kafka_topic, value=reg)
+            if pks:
+                key_parts = []
+                for pk in pks:
+                    # Buscamos la PK case-insensitive
+                    v = reg.get(pk) or reg.get(pk.upper()) or reg.get(pk.lower())
+                    key_parts.append("" if v is None else str(v).strip())
+                
+                kafka_key = "|".join(key_parts)
+            else:
+                kafka_key = None
+
+            producer.send(kafka_topic, key=kafka_key, value=reg)
+
         producer.flush()
         producer.close()
 
-        logger.info(f"Envío a Kafka exitoso. {len(registros_validos)} mensajes.")
+        logger.info(f"Envío a Kafka exitoso. {len(registros_validos)} mensajes al tópico {kafka_topic}.")
 
         resultado = {
             'topic': kafka_topic,
@@ -560,9 +560,11 @@ def publicar_en_kafka(**context):
         }
         ti.xcom_push(key='resultado_kafka', value=resultado)
         return resultado
+
     except Exception as e:
-        logger.error(f"[ERROR KAFKA] {e}")
+        logger.error(f"[ERROR KAFKA] Fallo al enviar mensajes: {e}")
         raise
+
 
 
 def registrar_errores(**context):
