@@ -18,14 +18,17 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.models import Variable
 from airflow.exceptions import AirflowSkipException
 from datetime import datetime, timedelta
+from airflow.hooks.base import BaseHook
+from io import StringIO
+from pathlib import Path
+from kafka import KafkaProducer
+
 import logging
 import json
-from pathlib import Path
 import shutil
-from kafka import KafkaProducer
 import hashlib
 import re
-from io import StringIO
+import oracledb
 
 from masterdata_ikitech.parsers.fixed_width_parser import FixedWidthParser
 from masterdata_ikitech.validators.validators import DataValidator, get_validator_for_table
@@ -59,7 +62,8 @@ PK_MAPPING = {
     'db_masterdatahub.erp_categoria': ['codcia', 'sublin', 'catego'],
     'db_masterdatahub.erp_uen': ['codcia', 'depto'],
     'db_masterdatahub.erp_canal': ['canal'],
-    'db_masterdatahub.erp_segmentos': ['codcia']
+    'db_masterdatahub.erp_segmentos': [],
+    'db_masterdatahub.erp_subcategoria': []
 }
 
 logger = logging.getLogger(__name__)
@@ -218,6 +222,7 @@ def validar_registros(**context):
     tabla_destino = resultado_parseo['tabla_destino']
 
     logger.info(f"Validando {len(registros)} registros para {tabla_destino}")
+    
     validator_func = get_validator_for_table(tabla_destino)
     pks = PK_MAPPING.get(tabla_destino.lower(), [])
 
@@ -229,34 +234,28 @@ def validar_registros(**context):
     error_duplicidad_detectado = False
 
     for idx, record in enumerate(registros):
-        # canonical string + stable hash
-        canonical = cadena_registro_canónico(record)
-        row_hash = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
-
-        if row_hash in seen_hashes:
-            msg = f"Registro DUPLICADO EXACTO detectado en línea {idx+1}"
-            logger.error(msg)
-            registros_invalidos.append({'idx': idx, 'err': [msg]})
-            error_duplicidad_detectado = True
-            continue
-        seen_hashes.add(row_hash)
-
+        
+        # --- LÓGICA DE DUPLICADOS ---
         if pks:
+            # Validación de Duplicado Exacto (Fila completa)
+            canonical = cadena_registro_canónico(record)
+            row_hash = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+            if row_hash in seen_hashes:
+                msg = f"Registro DUPLICADO EXACTO detectado en línea {idx+1}"
+                logger.error(msg)
+                registros_invalidos.append({'idx': idx, 'err': [msg]})
+                error_duplicidad_detectado = True
+                continue
+            seen_hashes.add(row_hash)
+
+            # Validación de Llave Primaria (PK)
             pk_values = []
             for pk in pks:
-                # intentar buscar en diferentes formas
-                v = None
-                if pk.upper() in record:
-                    v = record.get(pk.upper())
-                elif pk.lower() in record:
-                    v = record.get(pk.lower())
-                else:
-                    v = record.get(pk)
+                v = record.get(pk) or record.get(pk.upper()) or record.get(pk.lower())
                 pk_values.append(normalizar_valores(v))
+            
             pk_tuple = tuple(pk_values)
-
-            if any(v == '' for v in pk_tuple):
-                pass
 
             if pk_tuple in seen_pks:
                 msg = f"PK DUPLICADA {pk_tuple} detectada en línea {idx+1}"
@@ -265,7 +264,8 @@ def validar_registros(**context):
                 error_duplicidad_detectado = True
                 continue
             seen_pks.add(pk_tuple)
-
+        
+        # --- LÓGICA DE TIPOS DE DATOS ---
         if validator_func:
             try:
                 es_valido, errores = validator_func(record)
@@ -273,7 +273,7 @@ def validar_registros(**context):
                 msg = f"ERROR VALIDANDO TIPO DE DATO en línea {idx+1}: {str(e)}"
                 logger.error(msg)
                 registros_invalidos.append({'idx': idx, 'err': [msg]})
-                error_duplicidad_detectado = True
+                error_duplicidad_detectado = True 
                 continue
 
             if es_valido:
@@ -284,6 +284,7 @@ def validar_registros(**context):
         else:
             registros_validos.append(record)
 
+    # --- RESULTADOS ---
     if len(registros_invalidos) > 0:
         logger.warning(f"{len(registros_invalidos)} registros rechazados en total.")
 
@@ -292,8 +293,8 @@ def validar_registros(**context):
     porcentaje_validez = (validos / total) * 100 if total > 0 else 0
 
     VALID_PERCENTAGE = float(Variable.get("valid_percentage", "100"))
-
     error_tasa = porcentaje_validez < VALID_PERCENTAGE
+    
     error_archivo_completo = error_duplicidad_detectado or error_tasa or len(registros_invalidos) > 0
 
     resultado_validacion = {
@@ -343,8 +344,6 @@ def preparar_staging_y_copy(**context):
     cur = conn.cursor()
 
     try:
-        # BACKUP
-        logger.info(f"[BACKUP] Creando backup seguro: {backup_full}")
         cur.execute(f"CREATE TABLE {backup_full} AS TABLE {tabla_destino};")
 
         # STAGING
@@ -431,16 +430,16 @@ def cargar_datos_postgres(**context):
         cur.execute(f"TRUNCATE {tabla_destino};")
 
         #Carga real
-        #logger.info(f"[POSTGRES] INSERT desde staging → {tabla_destino}")
-        #cur.execute(
-        #    f"INSERT INTO {tabla_destino} ({col_str}) "
-        #    f"SELECT {col_str} FROM {staging};"
-        #)
+        logger.info(f"[POSTGRES] INSERT desde staging → {tabla_destino}")
+        cur.execute(
+            f"INSERT INTO {tabla_destino} ({col_str}) "
+            f"SELECT {col_str} FROM {staging};"
+        )
         
         # PRUEBA FORZADA DEL ROLLBACK (activar para pruebas)
         
-        logger.info("[TEST] Forzando error para probar rollback...")
-        cur.execute("SELECT * FROM tabla_que_no_existe;")
+        #logger.info("[TEST] Forzando error para probar rollback...")
+        #cur.execute("SELECT * FROM tabla_que_no_existe;")
 
         #Commit atómico
         cur.execute("COMMIT;")
@@ -470,6 +469,116 @@ def cargar_datos_postgres(**context):
         cur.close()
 
     return {'ok': swap_ok}
+
+def cargar_datos_oracle(**context):
+    logger = logging.getLogger("airflow")
+    ti = context['task_instance']
+    
+    # --- Obtener Datos ---
+    res_valid = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion')
+    res_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    
+    if not res_valid or not res_parseo:
+        logger.info("[ORACLE] No hay datos para procesar.")
+        return
+
+    registros = res_valid.get('registros_validos', [])
+    if not registros:
+        logger.warning("[ORACLE] 0 registros válidos. No se realizará carga.")
+        return
+
+    # --- Definir Nombre Base de Tabla (por maestra) ---
+    tabla_base = res_parseo['tabla_destino'].split('.')[-1].upper().replace('ERP_', '')
+    
+    # --- Preparar Datos (enriquecimiento con FEMOD) ---
+    fecha_carga = datetime.now()
+    datos_bind = []
+    
+    for r in registros:
+        new_row = {k.upper(): v for k, v in r.items()}
+        # Inyectar FEMOD si falta
+        if 'FEMOD' not in new_row or not new_row['FEMOD']:
+            new_row['FEMOD'] = fecha_carga
+        datos_bind.append(new_row)
+
+    # Columnas finales
+    columnas_upper = list(datos_bind[0].keys())
+    cols_str = ", ".join(columnas_upper)
+    vals_str = ", ".join([f":{c}" for c in columnas_upper])
+    
+    sql_insert_staging = f"INSERT INTO {{tabla_staging}} ({cols_str}) VALUES ({vals_str})"
+
+    # --- Conexión a Oracle ---
+    conn_af = BaseHook.get_connection("oracle_masterdata")
+    
+    try:
+        dsn = f"{conn_af.host}:{conn_af.port}/{conn_af.extra_dejson.get('service_name', 'FREE')}"
+        
+        with oracledb.connect(user=conn_af.login, password=conn_af.password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                
+                schema = conn_af.login.upper()
+                tabla_real = f"{schema}.ERP_{tabla_base}"
+                tabla_staging = f"{schema}.STG_{tabla_base}"
+
+                logger.info(f"[ORACLE] Destino: {tabla_real} | Staging: {tabla_staging}")
+
+                # --- Asegurar que las tablas existen (auto-bootstrap) ---
+                cols_def = ", ".join(f"{c} VARCHAR2(4000)" for c in columnas_upper)
+
+                for nombre_tabla in (tabla_real, tabla_staging):
+                    try:
+                        cursor.execute(f"SELECT 1 FROM {nombre_tabla} WHERE 1 = 0")
+                    except oracledb.DatabaseError as e:
+                        error_obj, = e.args
+                        if error_obj.code == 942: 
+                            logger.info(f"[ORACLE] Creando tabla {nombre_tabla} dinámicamente")
+                            cursor.execute(f"CREATE TABLE {nombre_tabla} ({cols_def})")
+                        else:
+                            raise
+
+                # --- Limpiar Staging ---
+                logger.info(f"[ORACLE] Limpiando Staging: {tabla_staging}")
+                cursor.execute(f"TRUNCATE TABLE {tabla_staging}")
+
+                # --- Carga Masiva a Staging ---
+                logger.info(f"[ORACLE] Cargando {len(datos_bind)} filas a Staging...")
+                cursor.executemany(
+                    sql_insert_staging.format(tabla_staging=tabla_staging),
+                    datos_bind,
+                    batcherrors=True
+                )
+                
+                errores_batch = cursor.getbatcherrors()
+                if errores_batch:
+                    logger.warning(f"[ORACLE] Errores en carga Staging: {len(errores_batch)}")
+                    for e in errores_batch[:3]:
+                        logger.warning(f"[ORACLE] Batch error: {e.message}")
+
+                # --- SWAP: TRUNCATE Real + INSERT /*+ APPEND */ ---
+                logger.info(f"[ORACLE] Truncando tabla Real: {tabla_real}")
+                cursor.execute(f"TRUNCATE TABLE {tabla_real}")
+                
+                logger.info(f"[ORACLE] Moviendo datos Staging -> Real (Direct Path)")
+                sql_swap = f"""
+                    INSERT /*+ APPEND */ INTO {tabla_real} ({cols_str})
+                    SELECT {cols_str} FROM {tabla_staging}
+                """
+                cursor.execute(sql_swap)
+
+                logger.info(f"[ORACLE] Limpieza Final: Vaciando {tabla_staging}")
+                cursor.execute(f"TRUNCATE TABLE {tabla_staging}")
+                
+                # Commit Final
+                conn.commit()
+                logger.info(f"[ORACLE] ¡Éxito! Carga completada y Staging limpio. Tabla final: {tabla_real}")
+
+    except Exception as e:
+        logger.error(f"[ORACLE FATAL] Error en persistencia: {e}")
+        raise
+
+    return {'ok': True, 'oracle_table': tabla_real}
+
 
 
 
@@ -643,14 +752,13 @@ def mover_archivo(**context):
         return {'estado': estado}
     except Exception as e:
         logger.error(f"Error moviendo: {e}")
-        # Si quieres que NUNCA marque rojo, no hagas raise aquí:
-        # raise
         return {'estado': 'error_move', 'error': str(e)}
 
 
 def registrar_en_audit_log(**context):
     ti = context['task_instance']
     
+    # --- Recuperación de XComs ---
     archivo_real_nombre = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
     resultado_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
     
@@ -661,6 +769,17 @@ def registrar_en_audit_log(**context):
     staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
     postgres_status = ti.xcom_pull(task_ids='cargar_datos_postgres', key='postgres_swap_status') or {}
 
+    # --- Recuperar estado de Oracle ---
+    # Obtenemos el estado real de la tarea (success/failed) desde el DAG Run
+    oracle_state = 'unknown'
+    try:
+        oracle_ti = context['dag_run'].get_task_instance('cargar_datos_oracle')
+        if oracle_ti:
+            oracle_state = oracle_ti.state
+    except Exception:
+        pass
+    # -----------------------------------------
+
     tiempo_inicio = context.get('data_interval_start') or context.get('execution_date')
     if hasattr(tiempo_inicio, '_get_current_object'):
         tiempo_inicio = tiempo_inicio._get_current_object()
@@ -669,17 +788,26 @@ def registrar_en_audit_log(**context):
     status_final = 'OK'
     error_detalle = None
 
+    # --- Lógica de Prioridad de Errores ---
     if staging_status and not staging_status.get('ok', True):
         status_final = 'ERROR_STAGING'
         error_detalle = staging_status.get('error')
     elif postgres_status and not postgres_status.get('ok', True):
         status_final = 'ERROR_POSTGRES'
         error_detalle = postgres_status.get('error') or postgres_status.get('reason')
+    
+    # --- Validación de Oracle ---
+    elif oracle_state == 'failed':
+        status_final = 'ERROR_ORACLE'
+        error_detalle = "Fallo crítico durante la persistencia en Oracle (ver logs de tarea)"
+    # -----------------------------------
+
     elif resultado_validacion.get('error_critico_integridad'):
         status_final = 'ERROR_DUPLICADOS'
     elif resultado_validacion.get('es_vacio'):
         status_final = 'ERROR_VACIO'
 
+    # Preparación de JSONs
     parametros = json.dumps({
         'archivo': archivo_real_nombre,
         'tabla': resultado_parseo.get('tabla_destino'),
@@ -692,7 +820,8 @@ def registrar_en_audit_log(**context):
         'total': resultado_parseo.get('total_lineas', 0),
         'validos': resultado_validacion.get('lineas_validas_count', 0),
         'publicados': resultado_kafka.get('publicados', 0),
-        'status': status_final
+        'status': status_final,
+        'oracle_state': oracle_state
     })
 
     try:
@@ -700,7 +829,7 @@ def registrar_en_audit_log(**context):
         conn = pg_hook.get_conn()
         cursor = conn.cursor()
 
-        # Agregamos ::timestamp y ::jsonb para que coincida con la firma del SP
+        # Llamada al SP
         sql_call = """
             CALL db_masterdatahub.sp_registrar_logs(
                 %s::text, 
@@ -748,9 +877,9 @@ with DAG(
     t2 = PythonOperator(task_id='validar_registros', python_callable=validar_registros, provide_context=True)
     t3_pre = PythonOperator(task_id='preparar_staging_y_copy',python_callable=preparar_staging_y_copy,provide_context=True)
     t3 = PythonOperator(task_id='cargar_datos_postgres',python_callable=cargar_datos_postgres,provide_context=True)
-    t4 = PythonOperator(task_id='publicar_en_kafka', python_callable=publicar_en_kafka, provide_context=True)
-    t5 = PythonOperator(task_id='registrar_errores', python_callable=registrar_errores, provide_context=True, trigger_rule='all_done')
-    t6 = PythonOperator(task_id='mover_archivo', python_callable=mover_archivo, provide_context=True, trigger_rule='all_done')
-    t7 = PythonOperator(task_id='registrar_en_audit_log', python_callable=registrar_en_audit_log, provide_context=True, trigger_rule='all_done')
-    
-    t1 >> t2 >> t3_pre >> t3 >> t4 >> t5 >> t6 >> t7
+    t4 = PythonOperator(task_id='cargar_datos_oracle',python_callable=cargar_datos_oracle,provide_context=True)
+    t5 = PythonOperator(task_id='publicar_en_kafka', python_callable=publicar_en_kafka, provide_context=True)
+    t6 = PythonOperator(task_id='registrar_errores', python_callable=registrar_errores, provide_context=True, trigger_rule='all_done')
+    t7 = PythonOperator(task_id='mover_archivo', python_callable=mover_archivo, provide_context=True, trigger_rule='all_done')
+    t8 = PythonOperator(task_id='registrar_en_audit_log', python_callable=registrar_en_audit_log, provide_context=True, trigger_rule='all_done')
+    t1 >> t2 >> t3_pre >> t3 >> t4 >> t5 >> t6 >> t7 >> t8

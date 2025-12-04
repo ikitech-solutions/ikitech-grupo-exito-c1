@@ -39,6 +39,18 @@ services:
         KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       restart: unless-stopped
 
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    container_name: oracle
+    environment:
+      - ORACLE_PASSWORD=oracle_password
+      - ORACLE_DATABASE=free
+    ports:
+      - "1521:1521"
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+    restart: unless-stopped
+
   airflow-init:
     build: .
     depends_on:
@@ -110,3 +122,6 @@ services:
 networks:
   default:
     name: mdh_network
+
+volumes:
+  oracle_data:
