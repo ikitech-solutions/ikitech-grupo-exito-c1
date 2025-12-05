@@ -18,7 +18,7 @@ class TestFixedWidthParser:
     @pytest.fixture
     def parser(self):
         """Fixture que retorna un parser inicializado con el layout real."""
-        layouts_config = Path(__file__).parent.parent / 'dags' / 'masterdata_ikitech' / 'config' / 'layouts.json'
+        layouts_config = Path(__file__).parent.parent / 'dags' / 'masterdata_ikitech' / 'config' / 'layouts.toon'
         return FixedWidthParser(str(layouts_config))
     
     @pytest.fixture

@@ -24,20 +24,20 @@ services:
     restart: unless-stopped
 
   kafka:
-      image: confluentinc/cp-kafka:7.4.0
-      hostname: kafka
-      container_name: kafka
-      ports:
-        - "9092:9092"
-      environment:
-        KAFKA_NODE_ID: 1
-        KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-        KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-        KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
-        KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-        KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-        KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      restart: unless-stopped
+    image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    restart: unless-stopped
 
   oracle:
     image: gvenzl/oracle-free:23-slim
@@ -65,6 +65,7 @@ services:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./secrets:/opt/airflow/secrets
     entrypoint: /bin/bash
     command:
       - -c
@@ -94,6 +95,7 @@ services:
       - ./input:/input
       - ./processed:/processed
       - ./error:/error
+      - ./secrets:/opt/airflow/secrets
     ports:
       - "8080:8080"
     command: webserver
@@ -116,6 +118,7 @@ services:
       - ./input:/input
       - ./processed:/processed
       - ./error:/error
+      - ./secrets:/opt/airflow/secrets
     command: scheduler
     restart: unless-stopped
 

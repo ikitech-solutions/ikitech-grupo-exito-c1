@@ -44,3 +44,5 @@ site/
 *~
 
 pgdata/
+secrets/
+secrets/*

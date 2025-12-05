@@ -1,10 +1,10 @@
-"""
+""""
 DAG Hijo: Procesamiento de Archivo Individual de Maestra
 
 Este DAG procesa un archivo individual de maestra:
-1. Lee el archivo fixed-width
+1. Lee el archivo fixed-width o delimitado
 2. Parsea y valida los registros
-3. Publica en Kafka
+3. Publica en Kafka (mensajes en formato TOON)
 4. Mueve el archivo a /processed/ o /error/
 5. Registra en audit_log
 
@@ -22,7 +22,7 @@ from airflow.hooks.base import BaseHook
 from io import StringIO
 from pathlib import Path
 from kafka import KafkaProducer
-
+from masterdata_ikitech.utils.gcs_utils import export_to_parquet_and_upload
 import logging
 import json
 import shutil
@@ -32,6 +32,9 @@ import oracledb
 
 from masterdata_ikitech.parsers.fixed_width_parser import FixedWidthParser
 from masterdata_ikitech.validators.validators import DataValidator, get_validator_for_table
+from masterdata_ikitech.utils.toon_encoder import encode as toon_encode
+
+from toon_format import decode as toon_decode
 
 DEFAULT_ARGS = {
     'owner': 'ikitech',
@@ -42,14 +45,19 @@ DEFAULT_ARGS = {
     'retry_delay': timedelta(minutes=2),
 }
 
+GCS_BUCKET = Variable.get("gcs_bucket_masterdata", default_var="bucket-grupoexito")
+GCS_CONN_ID = Variable.get("gcs_conn_id", default_var="gcs_masterdata")
 GCP_INPUT_PATH = Variable.get("gcp_input_path", "/input/")
 GCP_PROCESSED_PATH = Variable.get("gcp_processed_path", "/processed/")
 GCP_ERROR_PATH = Variable.get("gcp_error_path", "/error/")
 KAFKA_BOOTSTRAP_SERVERS = Variable.get("kafka_bootstrap_servers", "kafka:9092")
-KAFKA_TOPIC_PREFIX = Variable.get("kafka_topic_prefix", "masterdata.erp.")
 POSTGRES_CONN_ID = Variable.get("postgres_conn_id", "postgres_masterdata")
 
-# MAPA DE LLAVES PRIMARIAS
+# Layouts de maestras en formato TOON desde Variables
+LAYOUTS_TOON = Variable.get("maestras_layouts_toon", default_var=None)
+LAYOUTS_DICT = toon_decode(LAYOUTS_TOON) if LAYOUTS_TOON else {}
+
+# MAPA DE LLAVES PRIMARIAS 
 PK_MAPPING = {
     'db_masterdatahub.erp_compania': ['codcia'],
     'db_masterdatahub.erp_moneda': ['cod_mon'],
@@ -100,7 +108,6 @@ def asegurar_columna_hash_e_indice(pg_hook: PostgresHook, tabla: str):
 
 
 def normalizar_valores(v):
-
     if v is None:
         return ''
     s = str(v)
@@ -114,18 +121,10 @@ def normalizar_valores(v):
 
 
 def cadena_registro_canónico(record: dict) -> str:
-
     keys = sorted(record.keys(), key=lambda x: x.lower())
     parts = []
     for k in keys:
-        # Soportar claves en mayúscula/minúscula
-        v = None
-        if k in record:
-            v = record[k]
-        elif k.upper() in record:
-            v = record[k.upper()]
-        elif k.lower() in record:
-            v = record[k.lower()]
+        v = record.get(k) or record.get(k.upper()) or record.get(k.lower())
         val = normalizar_valores(v)
         parts.append(f"{str(k).upper()}={val}")
     return "|".join(parts)
@@ -134,52 +133,51 @@ def cadena_registro_canónico(record: dict) -> str:
 def leer_y_parsear_archivo(**context):
     conf = context['dag_run'].conf
     archivo_nombre_base = conf.get('archivo_nombre')
-    
+
     if not archivo_nombre_base:
         raise ValueError("Configuración inválida: falta archivo_nombre")
-    
+
     if not archivo_nombre_base.lower().endswith('.txt'):
         msg = f"Error Crítico: El parámetro de entrada '{archivo_nombre_base}' no tiene extensión .txt."
         logger.error(msg)
         resultado_error = {
             'registros': [], 'errores': [msg], 'total_lineas': 0, 'lineas_validas': 0,
-            'lineas_invalidas': 0, 'tabla_destino': None, 'archivo': archivo_nombre_base, 
-            'es_vacio': True 
+            'lineas_invalidas': 0, 'tabla_destino': None, 'archivo': archivo_nombre_base,
+            'es_vacio': True
         }
         context['task_instance'].xcom_push(key='resultado_parseo', value=resultado_error)
         return resultado_error
 
     nombre_busqueda = Path(archivo_nombre_base).stem
     input_dir = Path(GCP_INPUT_PATH)
-    
+
     logger.info(f"Buscando archivo: {nombre_busqueda} con .txt en {input_dir}")
-    
+
     candidatos = list(input_dir.glob(f"{nombre_busqueda}*"))
-    
+
     archivos_encontrados = [
-        f for f in candidatos 
+        f for f in candidatos
         if f.suffix.lower() == '.txt'
     ]
-    
+
     if not archivos_encontrados:
-        logger.warning(f"No se encontró ningún archivo .txt válido para {nombre_busqueda}. (Se ignoraron {len(candidatos) - len(archivos_encontrados)} archivos sin extensión correcta).")
+        logger.warning(f"No se encontró ningún archivo .txt válido para {nombre_busqueda}.")
         raise AirflowSkipException(f"Archivo .txt no encontrado: {nombre_busqueda}")
-    
+
     archivo_real = archivos_encontrados[0]
     archivo_ruta = str(archivo_real)
-    
-    logger.info(f"Archivo encontrado y validado: {archivo_real.name}")
-    
-    # Guardamos referencias
+
+    logger.info(f"Archivo encontrado: {archivo_real.name}")
+
     context['task_instance'].xcom_push(key='archivo_real_nombre', value=archivo_real.name)
     context['task_instance'].xcom_push(key='archivo_real_ruta', value=archivo_ruta)
-    
-    layouts_config_path = str(Path(__file__).resolve().parent / 'config' / 'layouts.json')
-    parser = FixedWidthParser(layouts_config_path)
-    
+
+    # Parser basado en layouts TOON cargados desde Variable
+    parser = FixedWidthParser(layouts=LAYOUTS_DICT)
+
     # Validación de estructura interna
     validacion = parser.validate_file_structure(archivo_ruta, archivo_nombre_base)
-    
+
     if not validacion['valido']:
         if validacion.get('error') == "Archivo vacío":
             logger.error(f"Archivo VACÍO detectado: {archivo_real.name}. Se enviará a ERROR.")
@@ -191,22 +189,24 @@ def leer_y_parsear_archivo(**context):
             return resultado_vacio
         else:
             raise ValueError(f"Archivo inválido: {validacion['error']}")
-    
+
     logger.info(f"Archivo válido. Encoding: {validacion['encoding']}")
+
     resultado = parser.parse_file(archivo_ruta, archivo_nombre_base)
-    
+
+    # Normalizamos schema db_masterdata_hub -> db_masterdatahub para que machee con PK_MAPPING
     tabla = resultado.get('tabla_destino')
-    if tabla and '.' not in tabla:
-        resultado['tabla_destino'] = f"db_masterdatahub.erp_{tabla}"
+    if tabla:
+        resultado['tabla_destino'] = tabla.replace('db_masterdata_hub', 'db_masterdatahub')
 
     if resultado.get('es_vacio'):
-        logger.error(f"Archivo VACÍO detectado: {archivo_real.name}. Se enviará a ERROR.")
+        logger.error(f"Archivo VACÍO: {archivo_real.name}.")
     else:
-        logger.info(f"Parseo OK. {resultado.get('lineas_validas', 0)} registros procesados.")
-        
+        logger.info(f"Parseo OK: {resultado.get('lineas_validas', 0)} registros.")
+
     if resultado.get('lineas_invalidas', 0) > 0:
-        logger.warning(f"{resultado['lineas_invalidas']} registros con error de formato.")
-    
+        logger.warning(f"{resultado['lineas_invalidas']} registros con error.")
+
     context['task_instance'].xcom_push(key='resultado_parseo', value=resultado)
     return resultado
 
@@ -222,9 +222,9 @@ def validar_registros(**context):
     tabla_destino = resultado_parseo['tabla_destino']
 
     logger.info(f"Validando {len(registros)} registros para {tabla_destino}")
-    
+
     validator_func = get_validator_for_table(tabla_destino)
-    pks = PK_MAPPING.get(tabla_destino.lower(), [])
+    pks = PK_MAPPING.get(normalizar_tabla(tabla_destino), [])
 
     registros_validos = []
     registros_invalidos = []
@@ -234,10 +234,9 @@ def validar_registros(**context):
     error_duplicidad_detectado = False
 
     for idx, record in enumerate(registros):
-        
-        # --- LÓGICA DE DUPLICADOS ---
+
+        # --- Duplicados exactos ---
         if pks:
-            # Validación de Duplicado Exacto (Fila completa)
             canonical = cadena_registro_canónico(record)
             row_hash = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
@@ -249,12 +248,11 @@ def validar_registros(**context):
                 continue
             seen_hashes.add(row_hash)
 
-            # Validación de Llave Primaria (PK)
+            # --- PK duplicada ---
             pk_values = []
             for pk in pks:
                 v = record.get(pk) or record.get(pk.upper()) or record.get(pk.lower())
                 pk_values.append(normalizar_valores(v))
-            
             pk_tuple = tuple(pk_values)
 
             if pk_tuple in seen_pks:
@@ -264,49 +262,49 @@ def validar_registros(**context):
                 error_duplicidad_detectado = True
                 continue
             seen_pks.add(pk_tuple)
-        
-        # --- LÓGICA DE TIPOS DE DATOS ---
+
+        # --- Validación de tipos ---
         if validator_func:
             try:
                 es_valido, errores = validator_func(record)
             except Exception as e:
-                msg = f"ERROR VALIDANDO TIPO DE DATO en línea {idx+1}: {str(e)}"
+                msg = f"ERROR VALIDANDO TIPO en línea {idx+1}: {str(e)}"
                 logger.error(msg)
                 registros_invalidos.append({'idx': idx, 'err': [msg]})
-                error_duplicidad_detectado = True 
+                error_duplicidad_detectado = True
                 continue
 
             if es_valido:
                 registros_validos.append(record)
             else:
                 registros_invalidos.append({'idx': idx, 'err': errores})
-                logger.error(f"Registro rechazado en línea {idx+1}: {errores}")
+                logger.error(f"Registro rechazado línea {idx+1}: {errores}")
         else:
             registros_validos.append(record)
 
-    # --- RESULTADOS ---
-    if len(registros_invalidos) > 0:
-        logger.warning(f"{len(registros_invalidos)} registros rechazados en total.")
+    if registros_invalidos:
+        logger.warning(f"{len(registros_invalidos)} registros rechazados.")
 
     total = len(registros)
     validos = len(registros_validos)
-    porcentaje_validez = (validos / total) * 100 if total > 0 else 0
+    porcentaje = (validos / total) * 100 if total > 0 else 0
 
     VALID_PERCENTAGE = float(Variable.get("valid_percentage", "100"))
-    error_tasa = porcentaje_validez < VALID_PERCENTAGE
-    
-    error_archivo_completo = error_duplicidad_detectado or error_tasa or len(registros_invalidos) > 0
+    error_tasa = porcentaje < VALID_PERCENTAGE
+
+    error_archivo = error_duplicidad_detectado or error_tasa or len(registros_invalidos) > 0
 
     resultado_validacion = {
         'registros_validos': registros_validos,
         'registros_invalidos': registros_invalidos,
         'lineas_validas_count': validos,
         'es_vacio': False,
-        'error_critico_integridad': error_archivo_completo
+        'error_critico_integridad': error_archivo
     }
 
     context['task_instance'].xcom_push(key='resultado_validacion', value=resultado_validacion)
     return resultado_validacion
+
 
 def preparar_staging_y_copy(**context):
 
@@ -336,18 +334,15 @@ def preparar_staging_y_copy(**context):
     schema_name, table_name = tabla_destino.split('.', 1)
 
     staging_full = f"{schema_name}.stg_{table_name}"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_full = f"{schema_name}.bkp_{table_name}_{timestamp}"
 
     pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
     conn = pg.get_conn()
     cur = conn.cursor()
 
     try:
-        cur.execute(f"CREATE TABLE {backup_full} AS TABLE {tabla_destino};")
-
-        # STAGING
+        # --- STAGING ---
         logger.info(f"[STAGING] Creando tabla staging: {staging_full}")
+
         cur.execute(
             f"CREATE TABLE IF NOT EXISTS {staging_full} "
             f"(LIKE {tabla_destino} INCLUDING DEFAULTS INCLUDING GENERATED);"
@@ -372,7 +367,6 @@ def preparar_staging_y_copy(**context):
         conn.commit()
 
         ti.xcom_push("staging_table", staging_full)
-        ti.xcom_push("backup_table", backup_full)
         ti.xcom_push("staging_columns", columnas)
         ti.xcom_push("staging_status", {"ok": True})
 
@@ -387,6 +381,7 @@ def preparar_staging_y_copy(**context):
 
     finally:
         cur.close()
+
 
 def cargar_datos_postgres(**context):
 
@@ -435,13 +430,8 @@ def cargar_datos_postgres(**context):
             f"INSERT INTO {tabla_destino} ({col_str}) "
             f"SELECT {col_str} FROM {staging};"
         )
-        
-        # PRUEBA FORZADA DEL ROLLBACK (activar para pruebas)
-        
-        #logger.info("[TEST] Forzando error para probar rollback...")
-        #cur.execute("SELECT * FROM tabla_que_no_existe;")
 
-        #Commit atómico
+        # Commit atómico
         cur.execute("COMMIT;")
         logger.info("[POSTGRES] Swap completado correctamente")
 
@@ -470,14 +460,15 @@ def cargar_datos_postgres(**context):
 
     return {'ok': swap_ok}
 
+
 def cargar_datos_oracle(**context):
     logger = logging.getLogger("airflow")
     ti = context['task_instance']
-    
+
     # --- Obtener Datos ---
     res_valid = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion')
     res_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
-    
+
     if not res_valid or not res_parseo:
         logger.info("[ORACLE] No hay datos para procesar.")
         return
@@ -489,11 +480,11 @@ def cargar_datos_oracle(**context):
 
     # --- Definir Nombre Base de Tabla (por maestra) ---
     tabla_base = res_parseo['tabla_destino'].split('.')[-1].upper().replace('ERP_', '')
-    
-    # --- Preparar Datos (enriquecimiento con FEMOD) ---
+
+    # --- Preparar Datos ---
     fecha_carga = datetime.now()
     datos_bind = []
-    
+
     for r in registros:
         new_row = {k.upper(): v for k, v in r.items()}
         # Inyectar FEMOD si falta
@@ -505,18 +496,18 @@ def cargar_datos_oracle(**context):
     columnas_upper = list(datos_bind[0].keys())
     cols_str = ", ".join(columnas_upper)
     vals_str = ", ".join([f":{c}" for c in columnas_upper])
-    
+
     sql_insert_staging = f"INSERT INTO {{tabla_staging}} ({cols_str}) VALUES ({vals_str})"
 
     # --- Conexión a Oracle ---
     conn_af = BaseHook.get_connection("oracle_masterdata")
-    
+
     try:
         dsn = f"{conn_af.host}:{conn_af.port}/{conn_af.extra_dejson.get('service_name', 'FREE')}"
-        
+
         with oracledb.connect(user=conn_af.login, password=conn_af.password, dsn=dsn) as conn:
             with conn.cursor() as cursor:
-                
+
                 schema = conn_af.login.upper()
                 tabla_real = f"{schema}.ERP_{tabla_base}"
                 tabla_staging = f"{schema}.STG_{tabla_base}"
@@ -531,7 +522,7 @@ def cargar_datos_oracle(**context):
                         cursor.execute(f"SELECT 1 FROM {nombre_tabla} WHERE 1 = 0")
                     except oracledb.DatabaseError as e:
                         error_obj, = e.args
-                        if error_obj.code == 942: 
+                        if error_obj.code == 942:
                             logger.info(f"[ORACLE] Creando tabla {nombre_tabla} dinámicamente")
                             cursor.execute(f"CREATE TABLE {nombre_tabla} ({cols_def})")
                         else:
@@ -548,7 +539,7 @@ def cargar_datos_oracle(**context):
                     datos_bind,
                     batcherrors=True
                 )
-                
+
                 errores_batch = cursor.getbatcherrors()
                 if errores_batch:
                     logger.warning(f"[ORACLE] Errores en carga Staging: {len(errores_batch)}")
@@ -558,7 +549,7 @@ def cargar_datos_oracle(**context):
                 # --- SWAP: TRUNCATE Real + INSERT /*+ APPEND */ ---
                 logger.info(f"[ORACLE] Truncando tabla Real: {tabla_real}")
                 cursor.execute(f"TRUNCATE TABLE {tabla_real}")
-                
+
                 logger.info(f"[ORACLE] Moviendo datos Staging -> Real (Direct Path)")
                 sql_swap = f"""
                     INSERT /*+ APPEND */ INTO {tabla_real} ({cols_str})
@@ -568,7 +559,7 @@ def cargar_datos_oracle(**context):
 
                 logger.info(f"[ORACLE] Limpieza Final: Vaciando {tabla_staging}")
                 cursor.execute(f"TRUNCATE TABLE {tabla_staging}")
-                
+
                 # Commit Final
                 conn.commit()
                 logger.info(f"[ORACLE] ¡Éxito! Carga completada y Staging limpio. Tabla final: {tabla_real}")
@@ -578,8 +569,6 @@ def cargar_datos_oracle(**context):
         raise
 
     return {'ok': True, 'oracle_table': tabla_real}
-
-
 
 
 def publicar_en_kafka(**context):
@@ -593,80 +582,98 @@ def publicar_en_kafka(**context):
     staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
     postgres_status = ti.xcom_pull(task_ids='cargar_datos_postgres', key='postgres_swap_status') or {}
 
-    # --- Validaciones de Flujo (Circuit Breakers) ---
+    # --------------------------
+    # VALIDACIONES (circuit breakers)
+    # --------------------------
     if not staging_status.get("ok", True):
-        logger.warning("Publicación a Kafka cancelada porque staging/copy falló.")
+        logger.warning("Kafka cancelado: falla en staging/copy.")
         ti.xcom_push('resultado_kafka', {'publicados': 0, 'motivo': 'staging_failed'})
         return None
 
-    # Si el swap en Postgres falló -> NO Kafka
     if postgres_status and not postgres_status.get("ok", True):
-        logger.warning("Publicación a Kafka cancelada porque swap en Postgres falló.")
+        logger.warning("Kafka cancelado: falla en swap de Postgres.")
         ti.xcom_push('resultado_kafka', {'publicados': 0, 'motivo': 'postgres_failed'})
         return None
 
-    # Si no hay datos o la validación falló
     if not resultado_parseo or not resultado_validacion:
         return None
+
     if resultado_validacion.get('es_vacio'):
         return None
+
     if resultado_validacion.get('error_critico_integridad'):
-        logger.info("Publicación a Kafka cancelada por validación de integridad.")
+        logger.info("Kafka cancelado por error crítico de integridad.")
         return None
 
     registros_validos = resultado_validacion.get('registros_validos', [])
-    tabla_destino = resultado_parseo['tabla_destino'] # Ejemplo: db_masterdatahub.erp_compania
+    tabla_destino = resultado_parseo['tabla_destino']
 
     if not registros_validos:
-        logger.info("No hay registros válidos para publicar.")
+        logger.info("No hay registros válidos para Kafka.")
         return None
 
-    # --- Construcción del Tópico ---
-    kafka_prefix = Variable.get("kafka_topic_prefix", "maestras.erp.") 
-    
-    nombre_tabla_limpio = tabla_destino.split('.')[-1].lower().replace('erp_', '')
-    
-    kafka_topic = f"{kafka_prefix}{nombre_tabla_limpio}"
+    # --------------------------
+    # TOPIC DESDE TOON
+    # --------------------------
+    kafka_topic = resultado_parseo.get('kafka_topic')
 
-    logger.info(f"Enviando a {KAFKA_BOOTSTRAP_SERVERS}. Topic calculado: {kafka_topic}")
+    if not kafka_topic:
+        logger.info(f"[KAFKA] Layout sin kafka_topic -> No se publicará nada. Archivo={archivo_real_nombre}")
+        ti.xcom_push('resultado_kafka', {
+            'publicados': 0,
+            'motivo': 'no_kafka_topic_en_layout',
+            'archivo': archivo_real_nombre
+        })
+        return None
 
-    # --- Envío de Mensajes ---
+    # --------------------------
+    # CAMPOS CLAVE PARA LOG COMPACTION
+    # --------------------------
+    campos_clave = resultado_parseo.get('campos_clave') or []
+
+    logger.info(f"[KAFKA] Publicando archivo={archivo_real_nombre} -> topic={kafka_topic}")
+    logger.info(f"Campos clave usados para la key: {campos_clave}")
+
+    # --------------------------
+    # ENVÍO A KAFKA
+    # --------------------------
     try:
         producer = KafkaProducer(
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            key_serializer=lambda k: str(k).encode('utf-8'),
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            key_serializer=lambda k: None if k is None else str(k).encode('utf-8'),
+            value_serializer=lambda v: toon_encode(v).encode('utf-8'),
             api_version=(0, 10, 2),
             client_id='airflow-producer'
         )
 
-        # Obtenemos las PKs para construir la Key del mensaje (Vital para Log Compaction)
-        pks = PK_MAPPING.get(normalizar_tabla(tabla_destino), [])
+        publicados = 0
 
         for reg in registros_validos:
-            if pks:
+
+            if campos_clave:
                 key_parts = []
-                for pk in pks:
-                    # Buscamos la PK case-insensitive
-                    v = reg.get(pk) or reg.get(pk.upper()) or reg.get(pk.lower())
-                    key_parts.append("" if v is None else str(v).strip())
-                
+                for pk in campos_clave:
+                    val = reg.get(pk) or reg.get(pk.upper()) or reg.get(pk.lower())
+                    key_parts.append("" if val is None else str(val).strip())
                 kafka_key = "|".join(key_parts)
             else:
                 kafka_key = None
 
-            producer.send(kafka_topic, key=kafka_key, value=reg)
+            key = kafka_key.encode("utf-8") if kafka_key else None
+            producer.send(kafka_topic, key=key, value=reg)
+            publicados += 1
 
         producer.flush()
         producer.close()
 
-        logger.info(f"Envío a Kafka exitoso. {len(registros_validos)} mensajes al tópico {kafka_topic}.")
+        logger.info(f"[KAFKA] Envío exitoso: {publicados} mensajes al tópico {kafka_topic} (formato TOON).")
 
         resultado = {
             'topic': kafka_topic,
-            'publicados': len(registros_validos),
+            'publicados': publicados,
             'archivo': archivo_real_nombre
         }
+
         ti.xcom_push(key='resultado_kafka', value=resultado)
         return resultado
 
@@ -674,13 +681,76 @@ def publicar_en_kafka(**context):
         logger.error(f"[ERROR KAFKA] Fallo al enviar mensajes: {e}")
         raise
 
+def generar_parquet_y_subir_a_gcs(**context):
+    ti = context["task_instance"]
+
+    # Recuperar estado y datos del pipeline
+    resultado_parseo = ti.xcom_pull(
+        task_ids="leer_y_parsear_archivo",
+        key="resultado_parseo"
+    ) or {}
+
+    resultado_validacion = ti.xcom_pull(
+        task_ids="validar_registros",
+        key="resultado_validacion"
+    ) or {}
+
+    archivo_real_nombre = ti.xcom_pull(
+        task_ids="leer_y_parsear_archivo",
+        key="archivo_real_nombre"
+    ) or "desconocido"
+
+    # Registros ya validados
+    registros_validos = resultado_validacion.get("registros_validos") or []
+    tabla_destino = resultado_parseo.get("tabla_destino") or "tabla_desconocida"
+
+    if not registros_validos:
+        logger.info("[GCS] No hay registros válidos; no se genera parquet para GCS.")
+        ti.xcom_push(
+            key="resultado_gcs_parquet",
+            value={
+                "uploaded": False,
+                "rows": 0,
+                "motivo": "sin_registros",
+                "tabla_destino": tabla_destino,
+                "archivo": archivo_real_nombre,
+            },
+        )
+        return
+
+    nombre_tabla = tabla_destino.split(".")[-1].lower()
+    object_name = f"masterdata/{nombre_tabla}/{archivo_real_nombre}.parquet"
+
+    logger.info(
+        f"[GCS] Generando parquet para tabla '{tabla_destino}' "
+        f"archivo='{archivo_real_nombre}' -> gs://{GCS_BUCKET}/{object_name}"
+    )
+
+    resultado = export_to_parquet_and_upload(
+        registros=registros_validos,
+        bucket_name=GCS_BUCKET,
+        object_name=object_name,
+        gcp_conn_id=GCS_CONN_ID,
+    )
+
+    resultado.update(
+        {
+            "tabla_destino": tabla_destino,
+            "archivo": archivo_real_nombre,
+        }
+    )
+
+    ti.xcom_push(key="resultado_gcs_parquet", value=resultado)
+    return resultado
+
 
 
 def registrar_errores(**context):
     resultado_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo') or {}
     resultado_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion') or {}
     total = len(errores_parseo := resultado_parseo.get('errores', [])) + len(registros_invalidos := resultado_validacion.get('registros_invalidos', []))
-    if total > 0: logger.info(f"Registrando {total} errores.")
+    if total > 0:
+        logger.info(f"Registrando {total} errores.")
     return {'total_errores': total}
 
 
@@ -757,12 +827,13 @@ def mover_archivo(**context):
 
 def registrar_en_audit_log(**context):
     ti = context['task_instance']
-    
+
     # --- Recuperación de XComs ---
     archivo_real_nombre = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='archivo_real_nombre')
     resultado_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
-    
-    if not resultado_parseo: return {'registrado': False}
+
+    if not resultado_parseo:
+        return {'registrado': False}
 
     resultado_validacion = ti.xcom_pull(task_ids='validar_registros', key='resultado_validacion') or {}
     resultado_kafka = ti.xcom_pull(task_ids='publicar_en_kafka', key='resultado_kafka') or {}
@@ -795,7 +866,7 @@ def registrar_en_audit_log(**context):
     elif postgres_status and not postgres_status.get('ok', True):
         status_final = 'ERROR_POSTGRES'
         error_detalle = postgres_status.get('error') or postgres_status.get('reason')
-    
+
     # --- Validación de Oracle ---
     elif oracle_state == 'failed':
         status_final = 'ERROR_ORACLE'
@@ -813,7 +884,7 @@ def registrar_en_audit_log(**context):
         'tabla': resultado_parseo.get('tabla_destino'),
         'run': context['dag_run'].run_id
     })
-    
+
     info_adicional = json.dumps({'file': archivo_real_nombre})
 
     resultado_json = json.dumps({
@@ -842,7 +913,7 @@ def registrar_en_audit_log(**context):
                 %s::jsonb
             )
         """
-        
+
         cursor.execute(sql_call, (
             'procesamiento_archivo_maestra',  # 1. text
             tiempo_inicio,                    # 2. timestamp
@@ -860,7 +931,7 @@ def registrar_en_audit_log(**context):
 
     except Exception as e:
         logger.error(f"Error llamando a SP Audit: {e}")
-    
+
     return {'registrado': True}
 
 
@@ -872,14 +943,15 @@ with DAG(
     catchup=False,
     max_active_runs=15,
 ) as dag:
-    
+
     t1 = PythonOperator(task_id='leer_y_parsear_archivo', python_callable=leer_y_parsear_archivo, provide_context=True)
     t2 = PythonOperator(task_id='validar_registros', python_callable=validar_registros, provide_context=True)
-    t3_pre = PythonOperator(task_id='preparar_staging_y_copy',python_callable=preparar_staging_y_copy,provide_context=True)
-    t3 = PythonOperator(task_id='cargar_datos_postgres',python_callable=cargar_datos_postgres,provide_context=True)
-    t4 = PythonOperator(task_id='cargar_datos_oracle',python_callable=cargar_datos_oracle,provide_context=True)
+    t3_pre = PythonOperator(task_id='preparar_staging_y_copy', python_callable=preparar_staging_y_copy, provide_context=True)
+    t3 = PythonOperator(task_id='cargar_datos_postgres', python_callable=cargar_datos_postgres, provide_context=True)
+    t4 = PythonOperator(task_id='cargar_datos_oracle', python_callable=cargar_datos_oracle, provide_context=True)
     t5 = PythonOperator(task_id='publicar_en_kafka', python_callable=publicar_en_kafka, provide_context=True)
-    t6 = PythonOperator(task_id='registrar_errores', python_callable=registrar_errores, provide_context=True, trigger_rule='all_done')
-    t7 = PythonOperator(task_id='mover_archivo', python_callable=mover_archivo, provide_context=True, trigger_rule='all_done')
-    t8 = PythonOperator(task_id='registrar_en_audit_log', python_callable=registrar_en_audit_log, provide_context=True, trigger_rule='all_done')
-    t1 >> t2 >> t3_pre >> t3 >> t4 >> t5 >> t6 >> t7 >> t8
+    t6 = PythonOperator(task_id="generar_parquet_y_subir_a_gcs",python_callable=generar_parquet_y_subir_a_gcs,provide_context=True)
+    t7 = PythonOperator(task_id='registrar_errores', python_callable=registrar_errores, provide_context=True, trigger_rule='all_done')
+    t8 = PythonOperator(task_id='mover_archivo', python_callable=mover_archivo, provide_context=True, trigger_rule='all_done')
+    t9 = PythonOperator(task_id='registrar_en_audit_log', python_callable=registrar_en_audit_log, provide_context=True, trigger_rule='all_done')
+    t1 >> t2 >> t3_pre >> t3 >> t4 >> t5 >> t6 >> t7 >> t8 >> t9

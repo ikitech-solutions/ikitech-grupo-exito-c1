@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 # --- CONFIGURACIÓN DE ENTORNO ---
 # Por defecto local, (con variables para producción)
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
-TOPIC_PREFIX = os.getenv('KAFKA_TOPIC_PREFIX', 'maestras.erp.')
-NUM_PARTITIONS = int(os.getenv('KAFKA_PARTITIONS', '3'))
+TOPIC_PREFIX = os.getenv('KAFKA_TOPIC_PREFIX', 'masterdata.erp.')
+NUM_PARTITIONS = int(os.getenv('KAFKA_PARTITIONS', '1'))
 REPLICATION_FACTOR = int(os.getenv('KAFKA_REPLICATION_FACTOR', '1'))
 
 # --- CONFIGURACIÓN DE COMPACTACIÓN ---

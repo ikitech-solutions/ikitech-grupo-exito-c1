@@ -1,0 +1,155 @@
+XUEN.txt:
+  tabla_destino: db_masterdata_hub.erp_UEN
+  encoding: utf-8
+  tipo: fixed
+  campos[3]{nombre,start,end,required}:
+    DEPTO,0,3,true
+    NOMBRE,3,33,true
+    DIVIS1,33,35,false
+  campos_hardcoded:
+    CODCIA: "01"
+  kafka_topic: masterdata.erp.uen
+
+XCIUDAD.txt:
+  tabla_destino: db_masterdata_hub.erp_CIUDAD
+  encoding: utf-8
+  tipo: fixed
+  campos[4]{nombre,start,end,required}:
+    CIUDAD,0,3,true
+    NOMBRE,3,33,true
+    SUBZONA,33,35,false
+    CLIMA,35,37,false
+  campos_hardcoded:
+    COD_PAIS: "169"
+  kafka_topic: masterdata.erp.ciudad
+
+XWEDEP.txt:
+  tabla_destino: db_masterdata_hub.erp_DEPENDENCIA
+  encoding: utf-8
+  tipo: fixed
+  campos[2]{nombre,start,end,required}:
+    DEPEN,0,4,true
+    NOMBRE,4,34,true
+  kafka_topic: masterdata.erp.dependencia
+
+XWECIA.txt:
+  tabla_destino: db_masterdata_hub.erp_COMPANIA
+  encoding: utf-8
+  tipo: fixed
+  campos[2]{nombre,start,end,required}:
+    CODCIA,0,2,true
+    NOMBRE,2,32,true
+  kafka_topic: masterdata.erp.compania
+
+XWEPAI.txt:
+  tabla_destino: db_masterdata_hub.erp_PAIS
+  encoding: utf-8
+  tipo: fixed
+  campos[3]{nombre,start,end,required}:
+    COD_PAIS,0,4,true
+    NOMBRE,4,34,true
+    COD_MON,34,36,true
+  kafka_topic: masterdata.erp.pais
+
+XGEN.txt:
+  tabla_destino: db_masterdata_hub.erp_GERENCIA
+  encoding: utf-8
+  tipo: fixed
+  campos[2]{nombre,start,end,required}:
+    DIVIS,0,2,true
+    NOMBRE,2,32,true
+  campos_hardcoded:
+    CODCIA: "01"
+  kafka_topic: masterdata.erp.gerencia
+
+XCADENA.txt:
+  tabla_destino: db_masterdata_hub.erp_CADENA
+  encoding: utf-8
+  tipo: fixed
+  campos[2]{nombre,start,end,required}:
+    CODCADE,0,1,true
+    NOMBRE,1,31,true
+  kafka_topic: masterdata.erp.cadena
+
+XCAN.txt:
+  tabla_destino: db_masterdata_hub.erp_CANAL
+  encoding: utf-8
+  tipo: fixed
+  campos[2]{nombre,start,end,required}:
+    CANAL,0,2,true
+    NOMBRE,2,32,true
+  kafka_topic: masterdata.erp.canal
+
+XLEXSUBC.txt:
+  tabla_destino: db_masterdata_hub.erp_SUBCATEGORIA
+  encoding: utf-8
+  tipo: delimitado
+  delimitador: |
+  campos[3]{nombre,index,required}:
+    GRUPO,0,true
+    CATEGO,1,true
+    NOMBRE,4,true
+  campos_hardcoded:
+    CODCIA: "01"
+  kafka_topic: masterdata.erp.subcategoria
+
+XCATEG.txt:
+  tabla_destino: db_masterdata_hub.erp_CATEGORIA
+  encoding: utf-8
+  tipo: fixed
+  campos[3]{nombre,start,end,required}:
+    SUBLIN,0,3,true
+    CATEGO,3,8,true
+    NOMBRE,8,38,true
+  campos_hardcoded:
+    CODCIA: "01"
+  kafka_topic: masterdata.erp.categoria
+
+XLEXSUBL.txt:
+  tabla_destino: db_masterdata_hub.erp_SUBLINEA
+  encoding: utf-8
+  tipo: delimitado
+  delimitador: |
+  campos[2]{nombre,index,required}:
+    SUBLIN,0,true
+    NOMBRE,3,true
+  campos_hardcoded:
+    CODCIA: "01"
+  kafka_topic: masterdata.erp.sublinea
+
+CRLISUCATE.txt:
+  tabla_destino: db_masterdata_hub.erp_SEGMENTOS
+  encoding: utf-8
+  tipo: delimitado
+  delimitador: |
+  ignore_header: true
+  campos[4]{nombre,index,required}:
+    SUBLIN,6,true
+    SUBCATEGO,10,true
+    SEGMENS,13,true
+    NOMSEGS,14,false
+  campos_hardcoded:
+    CODCIA: "01"
+  kafka_topic: masterdata.erp.segmentos
+
+XMONEDA.txt:
+  tabla_destino: db_masterdata_hub.erp_MONEDA
+  encoding: utf-8
+  tipo: fixed
+  campos[2]{nombre,start,end,required}:
+    COD_MON,0,2,true
+    NOMBRE,2,32,true
+  kafka_topic: masterdata.erp.moneda
+
+MAESTRA_FAKE.txt:
+  tabla_destino: db_masterdata_hub.erp_MAESTRA_FAKE
+  encoding: utf-8
+  tipo: fixed
+  campos[2]{nombre,start,end,required}:
+    CODIGO,0,5,true
+    NOMBRE,5,20,true
+  campos_hardcoded:
+    CODCIA: "01"
+  kafka_topic: masterdata.erp.maestra_fake
+  campos_clave[1]:
+    - CODIGO
