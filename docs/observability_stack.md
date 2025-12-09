@@ -147,22 +147,7 @@ Para verificar que Prometheus está recolectando métricas correctamente:
 - Verifica que los exportadores estén en estado `UP` en la página de targets.
 - Revisa la configuración en `observability/prometheus/prometheus-windows.yml`.
 
-## 8. Diferencias con la versión Linux
-
-Esta implementación está optimizada para Windows y tiene las siguientes diferencias respecto a una implementación típica en Linux:
-
-**Componentes removidos:**
-- **Node Exporter:** No compatible con Windows (requiere acceso directo al sistema operativo host)
-- **cAdvisor:** Problemas de compatibilidad con Docker Desktop en Windows
-- **Promtail:** Dificultades para acceder a logs del sistema en Windows
-- **Marquez/OpenLineage:** Removido por complejidad innecesaria para el caso de uso actual
-
-**Archivos específicos para Windows:**
-- `docker-compose.observability-windows.yml`: Configuración optimizada para Windows
-- `start-observability-windows.ps1`: Script de PowerShell para despliegue automatizado
-- `observability/prometheus/prometheus-windows.yml`: Configuración de Prometheus sin targets incompatibles
-
-## 9. Próximos Pasos y Mejoras
+## 8. Próximos Pasos y Mejoras
 
 - **Configurar Alertmanager:** Desplegar y configurar Alertmanager para gestionar y enrutar las alertas.
 - **Integrar Logs en Dashboards:** Usar la funcionalidad de Grafana para correlacionar métricas y logs en los mismos dashboards.
