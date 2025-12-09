@@ -12,7 +12,8 @@ services:
     volumes:
       - ./pgdata:/var/lib/postgresql/data
       - ./dags/masterdata_ikitech/sql/db_masterdata_hub.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./observability/marquez/init-marquez-db.sql:/docker-entrypoint-initdb.d/02-init-marquez.sql
+      # Marquez DB init disabled
+      # - ./observability/marquez/init-marquez-db.sql:/docker-entrypoint-initdb.d/02-init-marquez.sql
     restart: unless-stopped
 
   zookeeper:
@@ -101,10 +102,10 @@ services:
       AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
       AIRFLOW__METRICS__STATSD_PORT: 9125
       AIRFLOW__METRICS__STATSD_PREFIX: airflow
-      # Observability - OpenLineage for Marquez
-      AIRFLOW__LINEAGE__BACKEND: openlineage.lineage_backend.OpenLineageBackend
-      OPENLINEAGE_URL: http://marquez:5000
-      OPENLINEAGE_NAMESPACE: grupo_exito_c1
+      # Observability - OpenLineage disabled (requires openlineage-airflow package)
+      # AIRFLOW__LINEAGE__BACKEND: openlineage.lineage_backend.OpenLineageBackend
+      # OPENLINEAGE_URL: http://marquez:5000
+      # OPENLINEAGE_NAMESPACE: grupo_exito_c1
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
@@ -135,10 +136,10 @@ services:
       AIRFLOW__METRICS__STATSD_PREFIX: airflow
       AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 5
       AIRFLOW__SCHEDULER__PRINT_STATS_INTERVAL: 30
-      # Observability - OpenLineage for Marquez
-      AIRFLOW__LINEAGE__BACKEND: openlineage.lineage_backend.OpenLineageBackend
-      OPENLINEAGE_URL: http://marquez:5000
-      OPENLINEAGE_NAMESPACE: grupo_exito_c1
+      # Observability - OpenLineage disabled (requires openlineage-airflow package)
+      # AIRFLOW__LINEAGE__BACKEND: openlineage.lineage_backend.OpenLineageBackend
+      # OPENLINEAGE_URL: http://marquez:5000
+      # OPENLINEAGE_NAMESPACE: grupo_exito_c1
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
