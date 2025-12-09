@@ -19,7 +19,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./observability/prometheus/prometheus-windows.yml:/etc/prometheus/prometheus.yml
       - ./observability/prometheus/alerts:/etc/prometheus/alerts
       - prometheus_data:/prometheus
     networks:
