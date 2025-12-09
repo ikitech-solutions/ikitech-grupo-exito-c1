@@ -65,7 +65,7 @@ if toon_decode is not None:
                 "Se utilizará EXPECTED_FILES por defecto."
             )
     except Exception as e:
-        logger.error(
+        logger.exception(
             f"[DAG MAESTRO] Error decodificando 'maestras_layouts_toon': {e}. "
             "Se usará EXPECTED_FILES por defecto."
         )

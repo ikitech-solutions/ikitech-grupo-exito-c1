@@ -16,7 +16,7 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.models import Variable
-from airflow.exceptions import AirflowSkipException
+from airflow.exceptions import AirflowSkipException, AirflowException
 from datetime import datetime, timedelta
 from airflow.hooks.base import BaseHook
 from io import StringIO
@@ -212,7 +212,8 @@ def leer_y_parsear_archivo(**context):
 
 
 def validar_registros(**context):
-    resultado_parseo = context['task_instance'].xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
+    ti = context['task_instance']
+    resultado_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
     if not resultado_parseo:
         return None
     if resultado_parseo.get('es_vacio'):
@@ -242,7 +243,7 @@ def validar_registros(**context):
 
             if row_hash in seen_hashes:
                 msg = f"Registro DUPLICADO EXACTO detectado en línea {idx+1}"
-                logger.error(msg)
+                logger.error(msg)  # Error real de integridad
                 registros_invalidos.append({'idx': idx, 'err': [msg]})
                 error_duplicidad_detectado = True
                 continue
@@ -257,7 +258,7 @@ def validar_registros(**context):
 
             if pk_tuple in seen_pks:
                 msg = f"PK DUPLICADA {pk_tuple} detectada en línea {idx+1}"
-                logger.error(msg)
+                logger.error(msg)  # Error real de integridad
                 registros_invalidos.append({'idx': idx, 'err': [msg]})
                 error_duplicidad_detectado = True
                 continue
@@ -302,7 +303,19 @@ def validar_registros(**context):
         'error_critico_integridad': error_archivo
     }
 
-    context['task_instance'].xcom_push(key='resultado_validacion', value=resultado_validacion)
+    ti.xcom_push(key='resultado_validacion', value=resultado_validacion)
+
+    if error_archivo:
+        logger.error(
+            f"Validación crítica falló para {tabla_destino}. "
+            f"Total={total}, válidos={validos}, rechazados={len(registros_invalidos)}. "
+            "El archivo será rechazado y la tarea se marcará como FAILED."
+        )
+        raise AirflowException(
+            "Error crítico de integridad en validación de registros "
+            "(duplicados / porcentaje mínimo / registros inválidos)."
+        )
+
     return resultado_validacion
 
 
@@ -317,18 +330,19 @@ def preparar_staging_y_copy(**context):
     if not res_parseo or not res_valid:
         logger.error("No hay datos para staging.")
         ti.xcom_push("staging_status", {"ok": False, "error": "sin_datos"})
-        return {"ok": False}
+        # Error de flujo: marca la tarea como FAILED
+        raise AirflowException("No hay datos para staging (XCom ausente).")
 
     if res_valid.get("error_critico_integridad", False):
-        logger.warning("Validación crítica falló. Staging NO generado.")
+        logger.error("Validación crítica falló. Staging NO generado.")
         ti.xcom_push("staging_status", {"ok": False, "error": "validacion_critica"})
-        return {"ok": False}
+        raise AirflowException("Validación crítica falló. Staging no se generó.")
 
     registros = res_valid.get("registros_validos", [])
     if not registros:
-        logger.warning("No hay registros válidos para staging.")
+        logger.error("No hay registros válidos para staging.")
         ti.xcom_push("staging_status", {"ok": False, "error": "sin_validos"})
-        return {"ok": False}
+        raise AirflowException("No hay registros válidos para staging.")
 
     tabla_destino = normalizar_tabla(res_parseo["tabla_destino"].lower())
     schema_name, table_name = tabla_destino.split('.', 1)
@@ -374,10 +388,11 @@ def preparar_staging_y_copy(**context):
         return {"ok": True}
 
     except Exception as e:
-        logger.error(f"[STAGING ERROR] {str(e)}")
+        logger.exception(f"[STAGING ERROR] {str(e)}")
         conn.rollback()
         ti.xcom_push("staging_status", {"ok": False, "error": str(e)})
-        return {"ok": False}
+        # Error real: la tarea debe quedar en FAILED
+        raise AirflowException(f"Error en preparación de staging: {e}")
 
     finally:
         cur.close()
@@ -391,9 +406,9 @@ def cargar_datos_postgres(**context):
     # Validación previa: staging debe haber sido exitoso
     staging_status = ti.xcom_pull(task_ids='preparar_staging_y_copy', key='staging_status') or {}
     if not staging_status.get("ok", False):
-        logger.warning("[POSTGRES] Swap cancelado: staging falló.")
+        logger.error("[POSTGRES] Swap cancelado: staging falló.")
         ti.xcom_push('postgres_swap_status', {'ok': False, 'reason': 'staging_failed'})
-        return {'ok': False}
+        raise AirflowException("Swap en Postgres cancelado por fallo previo en staging.")
 
     # Datos del parseo
     res_parseo = ti.xcom_pull(task_ids='leer_y_parsear_archivo', key='resultado_parseo')
@@ -405,7 +420,7 @@ def cargar_datos_postgres(**context):
     if not staging or not columnas:
         logger.error("[POSTGRES] Información de staging incompleta.")
         ti.xcom_push('postgres_swap_status', {'ok': False, 'reason': 'missing_staging'})
-        return {'ok': False}
+        raise AirflowException("Información de staging incompleta en carga a Postgres.")
 
     col_str = ", ".join(columnas)
 
@@ -430,7 +445,17 @@ def cargar_datos_postgres(**context):
             f"INSERT INTO {tabla_destino} ({col_str}) "
             f"SELECT {col_str} FROM {staging};"
         )
+        
+        # Forzar error para pruebas
+        #tabla_destino_fake = f"{tabla_destino}_fake_no_existe"
 
+        #logger.error(f"[POSTGRES] FORZANDO ERROR → insertando en tabla inexistente: {tabla_destino_fake}")
+
+        #cur.execute(
+        #    f"INSERT INTO {tabla_destino_fake} ({col_str}) "
+        #    f"SELECT {col_str} FROM {staging};"
+        #)
+        
         # Commit atómico
         cur.execute("COMMIT;")
         logger.info("[POSTGRES] Swap completado correctamente")
@@ -439,12 +464,13 @@ def cargar_datos_postgres(**context):
         swap_ok = True
 
     except Exception as e:
-        logger.error(f"[POSTGRES ERROR] {str(e)}")
+        logger.exception(f"[POSTGRES ERROR] {str(e)}")
         conn.rollback()
 
-        logger.error("[POSTGRES] ROLLBACK ejecutado. Tabla productiva restaurada automáticamente.")
+        logger.warning("[POSTGRES] ROLLBACK ejecutado. Tabla productiva restaurada automáticamente.")
         ti.xcom_push('postgres_swap_status', {'ok': False, 'error': str(e)})
         swap_ok = False
+        raise
 
     finally:
         # Cleanup
@@ -565,7 +591,7 @@ def cargar_datos_oracle(**context):
                 logger.info(f"[ORACLE] ¡Éxito! Carga completada y Staging limpio. Tabla final: {tabla_real}")
 
     except Exception as e:
-        logger.error(f"[ORACLE FATAL] Error en persistencia: {e}")
+        logger.exception(f"[ORACLE FATAL] Error en persistencia: {e}")
         raise
 
     return {'ok': True, 'oracle_table': tabla_real}
@@ -602,7 +628,7 @@ def publicar_en_kafka(**context):
         return None
 
     if resultado_validacion.get('error_critico_integridad'):
-        logger.info("Kafka cancelado por error crítico de integridad.")
+        logger.warning("Kafka cancelado por error crítico de integridad.")
         return None
 
     registros_validos = resultado_validacion.get('registros_validos', [])
@@ -678,8 +704,9 @@ def publicar_en_kafka(**context):
         return resultado
 
     except Exception as e:
-        logger.error(f"[ERROR KAFKA] Fallo al enviar mensajes: {e}")
+        logger.exception(f"[ERROR KAFKA] Fallo al enviar mensajes: {e}")
         raise
+
 
 def generar_parquet_y_subir_a_gcs(**context):
     ti = context["task_instance"]
@@ -750,7 +777,7 @@ def registrar_errores(**context):
     resultado_validacion = context['task_instance'].xcom_pull(task_ids='validar_registros', key='resultado_validacion') or {}
     total = len(errores_parseo := resultado_parseo.get('errores', [])) + len(registros_invalidos := resultado_validacion.get('registros_invalidos', []))
     if total > 0:
-        logger.info(f"Registrando {total} errores.")
+        logger.warning(f"Registrando {total} errores.")
     return {'total_errores': total}
 
 
@@ -799,7 +826,7 @@ def mover_archivo(**context):
     elif cantidad_validos == 0:
         destino_path = GCP_ERROR_PATH
         estado = 'error_calidad_total'
-        logger.error(f"Moviendo a ERROR (0 registros válidos).")
+        logger.error("Moviendo a ERROR (0 registros válidos).")
     else:
         destino_path = GCP_PROCESSED_PATH
         estado = 'procesado'
@@ -821,7 +848,7 @@ def mover_archivo(**context):
         logger.info(f"Movido a: {destino_completo}")
         return {'estado': estado}
     except Exception as e:
-        logger.error(f"Error moviendo: {e}")
+        logger.exception(f"Error moviendo: {e}")
         return {'estado': 'error_move', 'error': str(e)}
 
 
@@ -841,7 +868,6 @@ def registrar_en_audit_log(**context):
     postgres_status = ti.xcom_pull(task_ids='cargar_datos_postgres', key='postgres_swap_status') or {}
 
     # --- Recuperar estado de Oracle ---
-    # Obtenemos el estado real de la tarea (success/failed) desde el DAG Run
     oracle_state = 'unknown'
     try:
         oracle_ti = context['dag_run'].get_task_instance('cargar_datos_oracle')
@@ -849,7 +875,6 @@ def registrar_en_audit_log(**context):
             oracle_state = oracle_ti.state
     except Exception:
         pass
-    # -----------------------------------------
 
     tiempo_inicio = context.get('data_interval_start') or context.get('execution_date')
     if hasattr(tiempo_inicio, '_get_current_object'):
@@ -859,26 +884,22 @@ def registrar_en_audit_log(**context):
     status_final = 'OK'
     error_detalle = None
 
-    # --- Lógica de Prioridad de Errores ---
+    # --- Lógica de prioridad de errores ---
     if staging_status and not staging_status.get('ok', True):
         status_final = 'ERROR_STAGING'
         error_detalle = staging_status.get('error')
     elif postgres_status and not postgres_status.get('ok', True):
         status_final = 'ERROR_POSTGRES'
         error_detalle = postgres_status.get('error') or postgres_status.get('reason')
-
-    # --- Validación de Oracle ---
     elif oracle_state == 'failed':
         status_final = 'ERROR_ORACLE'
         error_detalle = "Fallo crítico durante la persistencia en Oracle (ver logs de tarea)"
-    # -----------------------------------
-
     elif resultado_validacion.get('error_critico_integridad'):
         status_final = 'ERROR_DUPLICADOS'
     elif resultado_validacion.get('es_vacio'):
         status_final = 'ERROR_VACIO'
 
-    # Preparación de JSONs
+    # --- Preparación de JSONs ---
     parametros = json.dumps({
         'archivo': archivo_real_nombre,
         'tabla': resultado_parseo.get('tabla_destino'),
@@ -900,7 +921,6 @@ def registrar_en_audit_log(**context):
         conn = pg_hook.get_conn()
         cursor = conn.cursor()
 
-        # Llamada al SP
         sql_call = """
             CALL db_masterdatahub.sp_registrar_logs(
                 %s::text, 
@@ -915,24 +935,79 @@ def registrar_en_audit_log(**context):
         """
 
         cursor.execute(sql_call, (
-            'procesamiento_archivo_maestra',  # 1. text
-            tiempo_inicio,                    # 2. timestamp
-            tiempo_fin,                       # 3. timestamp
-            status_final,                     # 4. text
-            error_detalle,                    # 5. text
-            parametros,                       # 6. jsonb
-            resultado_json,                   # 7. jsonb
-            info_adicional                    # 8. jsonb
+            'procesamiento_archivo_maestra',
+            tiempo_inicio,
+            tiempo_fin,
+            status_final,
+            error_detalle,
+            parametros,
+            resultado_json,
+            info_adicional
         ))
 
         conn.commit()
         cursor.close()
-        logger.info(f"Audit Log registrado correctamente. Estado: {status_final}")
+        logger.info(f"Audit Log registrado correctamente en Postgres. Estado: {status_final}")
 
     except Exception as e:
-        logger.error(f"Error llamando a SP Audit: {e}")
+        logger.exception(f"Error llamando a SP Audit en Postgres: {e}")
+    try:
+        conn_af = BaseHook.get_connection("oracle_masterdata")
+        dsn = f"{conn_af.host}:{conn_af.port}/{conn_af.extra_dejson.get('service_name', 'FREE')}"
+
+        with oracledb.connect(user=conn_af.login, password=conn_af.password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+
+                sql_oracle = """
+                    INSERT INTO AUDIT_LOG (
+                        PROCEDURE_NAME,
+                        EXECUTION_TIME,
+                        END_TIME,
+                        USER_NAME,
+                        RESULT_STATUS,
+                        ERROR_MESSAGE,
+                        PARAMETERS,
+                        RESULT,
+                        DURATION,
+                        ADDITIONAL_INFO
+                    ) VALUES (
+                        :procedure_name,
+                        :execution_time,
+                        :end_time,
+                        :user_name,
+                        :result_status,
+                        :error_message,
+                        :parameters,
+                        :result,
+                        NUMTODSINTERVAL(:duration_seconds, 'SECOND'),
+                        :additional_info
+                    )
+                """
+
+                duration_seconds = (tiempo_fin - tiempo_inicio).total_seconds()
+
+                cursor.execute(sql_oracle, {
+                    "procedure_name": "procesamiento_archivo_maestra",
+                    "execution_time": tiempo_inicio,
+                    "end_time": tiempo_fin,
+                    "user_name": "airflow",
+                    "result_status": status_final,
+                    "error_message": error_detalle,
+                    "parameters": parametros,
+                    "result": resultado_json,
+                    "duration_seconds": duration_seconds,
+                    "additional_info": info_adicional
+                })
+
+                conn.commit()
+                logger.info("[AUDIT ORACLE] Auditoría registrada correctamente en Oracle.")
+
+    except Exception as e:
+        logger.exception(f"[AUDIT ORACLE] Error registrando auditoría en Oracle: {e}")
 
     return {'registrado': True}
+
+
 
 
 with DAG(
