@@ -1,5 +1,5 @@
 # ============================================
-# Script de Inicio y Validación - Observabilidad
+# Script de Inicio y Validacion - Observabilidad
 # Para Windows con Docker Desktop
 # ============================================
 
@@ -8,14 +8,14 @@ Write-Host "  Inicio de Stack con Observabilidad" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Función para verificar si un puerto está en uso
+# Funcion para verificar si un puerto esta en uso
 function Test-Port {
     param([int]$Port)
     $connection = Test-NetConnection -ComputerName localhost -Port $Port -WarningAction SilentlyContinue -InformationLevel Quiet
     return $connection
 }
 
-# Función para esperar que un servicio esté disponible
+# Funcion para esperar que un servicio este disponible
 function Wait-ForService {
     param(
         [string]$ServiceName,
@@ -23,18 +23,18 @@ function Wait-ForService {
         [int]$MaxAttempts = 30
     )
     
-    Write-Host "Esperando a que $ServiceName esté disponible..." -ForegroundColor Yellow
+    Write-Host "Esperando a que $ServiceName este disponible..." -ForegroundColor Yellow
     $attempt = 0
     
     while ($attempt -lt $MaxAttempts) {
         try {
             $response = Invoke-WebRequest -Uri $Url -Method Get -TimeoutSec 2 -UseBasicParsing -ErrorAction SilentlyContinue
             if ($response.StatusCode -eq 200) {
-                Write-Host "✓ $ServiceName está disponible" -ForegroundColor Green
+                Write-Host "[OK] $ServiceName esta disponible" -ForegroundColor Green
                 return $true
             }
         } catch {
-            # Servicio aún no disponible
+            # Servicio aun no disponible
         }
         
         $attempt++
@@ -43,7 +43,7 @@ function Wait-ForService {
     }
     
     Write-Host ""
-    Write-Host "✗ $ServiceName no respondió después de $MaxAttempts intentos" -ForegroundColor Red
+    Write-Host "[ERROR] $ServiceName no respondio despues de $MaxAttempts intentos" -ForegroundColor Red
     return $false
 }
 
@@ -53,12 +53,12 @@ function Wait-ForService {
 
 Write-Host "[1/6] Validaciones previas..." -ForegroundColor Cyan
 
-# Verificar que Docker Desktop está corriendo
+# Verificar que Docker Desktop esta corriendo
 try {
     docker ps | Out-Null
-    Write-Host "✓ Docker Desktop está corriendo" -ForegroundColor Green
+    Write-Host "[OK] Docker Desktop esta corriendo" -ForegroundColor Green
 } catch {
-    Write-Host "✗ Docker Desktop no está corriendo o no responde" -ForegroundColor Red
+    Write-Host "[ERROR] Docker Desktop no esta corriendo o no responde" -ForegroundColor Red
     Write-Host "Por favor, inicia Docker Desktop y vuelve a intentar" -ForegroundColor Yellow
     exit 1
 }
@@ -74,9 +74,9 @@ $requiredFiles = @(
 
 foreach ($file in $requiredFiles) {
     if (Test-Path $file) {
-        Write-Host "✓ Archivo encontrado: $file" -ForegroundColor Green
+        Write-Host "[OK] Archivo encontrado: $file" -ForegroundColor Green
     } else {
-        Write-Host "✗ Archivo faltante: $file" -ForegroundColor Red
+        Write-Host "[ERROR] Archivo faltante: $file" -ForegroundColor Red
         exit 1
     }
 }
@@ -94,8 +94,8 @@ Write-Host ""
 Write-Host "Verificando puertos..." -ForegroundColor Cyan
 foreach ($portInfo in $ports) {
     if (Test-Port -Port $portInfo.Port) {
-        Write-Host "⚠ Puerto $($portInfo.Port) ($($portInfo.Service)) ya está en uso" -ForegroundColor Yellow
-        $response = Read-Host "¿Deseas detener los contenedores existentes? (S/N)"
+        Write-Host "[WARN] Puerto $($portInfo.Port) ($($portInfo.Service)) ya esta en uso" -ForegroundColor Yellow
+        $response = Read-Host "Deseas detener los contenedores existentes? (S/N)"
         if ($response -eq "S" -or $response -eq "s") {
             Write-Host "Deteniendo contenedores existentes..." -ForegroundColor Yellow
             docker compose down
@@ -116,14 +116,14 @@ Write-Host ""
 # ============================================
 
 Write-Host "[2/6] Limpieza de estado previo..." -ForegroundColor Cyan
-$cleanup = Read-Host "¿Deseas limpiar contenedores y volúmenes previos? (S/N)"
+$cleanup = Read-Host "Deseas limpiar contenedores y volumenes previos? (S/N)"
 
 if ($cleanup -eq "S" -or $cleanup -eq "s") {
-    Write-Host "Limpiando contenedores y volúmenes..." -ForegroundColor Yellow
+    Write-Host "Limpiando contenedores y volumenes..." -ForegroundColor Yellow
     docker compose down -v
     docker compose -f docker-compose.observability-windows.yml down -v
     Start-Sleep -Seconds 5
-    Write-Host "✓ Limpieza completada" -ForegroundColor Green
+    Write-Host "[OK] Limpieza completada" -ForegroundColor Green
 } else {
     Write-Host "Saltando limpieza" -ForegroundColor Yellow
 }
@@ -131,25 +131,25 @@ if ($cleanup -eq "S" -or $cleanup -eq "s") {
 Write-Host ""
 
 # ============================================
-# PASO 3: Iniciar Aplicación Principal
+# PASO 3: Iniciar Aplicacion Principal
 # ============================================
 
-Write-Host "[3/6] Iniciando aplicación principal..." -ForegroundColor Cyan
+Write-Host "[3/6] Iniciando aplicacion principal..." -ForegroundColor Cyan
 docker compose up -d
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "✗ Error al iniciar la aplicación principal" -ForegroundColor Red
+    Write-Host "[ERROR] Error al iniciar la aplicacion principal" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "✓ Contenedores de aplicación iniciados" -ForegroundColor Green
+Write-Host "[OK] Contenedores de aplicacion iniciados" -ForegroundColor Green
 Write-Host ""
 
 # ============================================
-# PASO 4: Esperar a que los Servicios Estén Listos
+# PASO 4: Esperar a que los Servicios Esten Listos
 # ============================================
 
-Write-Host "[4/6] Esperando a que los servicios estén listos..." -ForegroundColor Cyan
+Write-Host "[4/6] Esperando a que los servicios esten listos..." -ForegroundColor Cyan
 
 # Esperar PostgreSQL
 Write-Host "Esperando PostgreSQL (60 segundos)..." -ForegroundColor Yellow
@@ -159,7 +159,7 @@ Start-Sleep -Seconds 60
 $airflowReady = Wait-ForService -ServiceName "Airflow" -Url "http://localhost:8080/health" -MaxAttempts 30
 
 if (-not $airflowReady) {
-    Write-Host "⚠ Airflow no respondió, pero continuaremos..." -ForegroundColor Yellow
+    Write-Host "[WARN] Airflow no respondio, pero continuaremos..." -ForegroundColor Yellow
 }
 
 Write-Host ""
@@ -172,14 +172,14 @@ Write-Host "[5/6] Iniciando stack de observabilidad..." -ForegroundColor Cyan
 docker compose -f docker-compose.observability-windows.yml up -d
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "✗ Error al iniciar el stack de observabilidad" -ForegroundColor Red
+    Write-Host "[ERROR] Error al iniciar el stack de observabilidad" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "✓ Contenedores de observabilidad iniciados" -ForegroundColor Green
+Write-Host "[OK] Contenedores de observabilidad iniciados" -ForegroundColor Green
 Write-Host ""
 
-# Esperar a que Prometheus y Grafana estén listos
+# Esperar a que Prometheus y Grafana esten listos
 Write-Host "Esperando servicios de observabilidad..." -ForegroundColor Yellow
 Start-Sleep -Seconds 30
 
@@ -189,10 +189,10 @@ $grafanaReady = Wait-ForService -ServiceName "Grafana" -Url "http://localhost:30
 Write-Host ""
 
 # ============================================
-# PASO 6: Verificación Final
+# PASO 6: Verificacion Final
 # ============================================
 
-Write-Host "[6/6] Verificación final..." -ForegroundColor Cyan
+Write-Host "[6/6] Verificacion final..." -ForegroundColor Cyan
 Write-Host ""
 
 # Mostrar estado de contenedores
@@ -213,9 +213,11 @@ $services = @(
 )
 
 foreach ($service in $services) {
-    $statusIcon = if ($service.Status) { "✓" } else { "✗" }
-    $statusColor = if ($service.Status) { "Green" } else { "Red" }
-    Write-Host "$statusIcon $($service.Name): $($service.Url)" -ForegroundColor $statusColor
+    if ($service.Status) {
+        Write-Host "[OK] $($service.Name): $($service.Url)" -ForegroundColor Green
+    } else {
+        Write-Host "[ERROR] $($service.Name): $($service.Url)" -ForegroundColor Red
+    }
 }
 
 Write-Host ""
@@ -231,13 +233,13 @@ Write-Host "Verificando logs de errores..." -ForegroundColor Cyan
 $errors = docker compose logs --tail=50 2>&1 | Select-String -Pattern "error|Error|ERROR|failed|Failed|FAILED" -CaseSensitive
 
 if ($errors) {
-    Write-Host "⚠ Se encontraron posibles errores en los logs:" -ForegroundColor Yellow
+    Write-Host "[WARN] Se encontraron posibles errores en los logs:" -ForegroundColor Yellow
     $errors | ForEach-Object { Write-Host $_.Line -ForegroundColor Yellow }
     Write-Host ""
     Write-Host "Para ver logs completos, ejecuta:" -ForegroundColor Cyan
-    Write-Host "  docker compose logs <nombre_servicio>" -ForegroundColor White
+    Write-Host "  docker compose logs nombre_servicio" -ForegroundColor White
 } else {
-    Write-Host "✓ No se encontraron errores críticos en los logs" -ForegroundColor Green
+    Write-Host "[OK] No se encontraron errores criticos en los logs" -ForegroundColor Green
 }
 
 Write-Host ""
@@ -247,7 +249,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Preguntar si desea abrir los navegadores
-$openBrowser = Read-Host "¿Deseas abrir las interfaces en el navegador? (S/N)"
+$openBrowser = Read-Host "Deseas abrir las interfaces en el navegador? (S/N)"
 if ($openBrowser -eq "S" -or $openBrowser -eq "s") {
     Start-Process "http://localhost:8080"
     Start-Process "http://localhost:9090"
