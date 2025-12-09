@@ -22,7 +22,7 @@ mappings:
       task_id: "$2"
       status: "$3"
 
-  - match: "airflow.task_instance_created-*"
+  - match: "airflow.task_instance_created.*"
     name: "airflow_task_instance_created"
     labels:
       dag_id: "$1"
