@@ -86,9 +86,10 @@ La solución implementa una **Arquitectura Event-Driven con Publish-Subscribe**,
 
 #### **ZONA 8: TARGET - Persistencia Satélite Oracle**
 - **Componentes:**
-  - **Oracle Database:** Sistema legado que consume maestras
+  - **Oracle Database:** Sistema legado que recibe datos directamente desde Airflow (no desde Kafka)
   - **RELIEF APP/SAC:** Aplicaciones que consumen desde Oracle
   - **System of Record:** Oracle como fuente de verdad para sistemas legados
+- **Integración:** Carga directa desde DAGs de Airflow por solicitud del cliente
 - **Patrón EIP:** Direct Data Integration
 
 ### Capas de la Arquitectura (SOURCE → MIDDLEWARE → SATELLITE)
@@ -124,11 +125,11 @@ graph LR
     D5 --> E[PostgreSQL Hub]
     D5 --> F[Kafka Topics]
     D5 --> G[GCP Pub/Sub]
+    D5 --> H4[Oracle DB]
     
     F --> H1[API Consumers]
     F --> H2[SQL Server]
     F --> H3[MongoDB]
-    F --> H4[Oracle DB]
     
     H4 --> I[RELIEF APP/SAC]
     
