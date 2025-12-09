@@ -1,0 +1,98 @@
+mappings:
+  # DAG run metrics
+  - match: "airflow.dag.*.*.duration"
+    name: "airflow_dag_run_duration"
+    labels:
+      dag_id: "$1"
+      status: "$2"
+
+  - match: "airflow.dag_processing.last_duration.*"
+    name: "airflow_dag_processing_last_duration"
+    labels:
+      dag_file: "$1"
+
+  - match: "airflow.scheduler.heartbeat"
+    name: "airflow_scheduler_heartbeat"
+
+  # Task metrics
+  - match: "airflow.task.*.*.*.duration"
+    name: "airflow_task_duration"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+      status: "$3"
+
+  - match: "airflow.task_instance_created-*"
+    name: "airflow_task_instance_created"
+    labels:
+      dag_id: "$1"
+
+  # Executor metrics
+  - match: "airflow.executor.open_slots"
+    name: "airflow_executor_open_slots"
+
+  - match: "airflow.executor.queued_tasks"
+    name: "airflow_executor_queued_tasks"
+
+  - match: "airflow.executor.running_tasks"
+    name: "airflow_executor_running_tasks"
+
+  # Pool metrics
+  - match: "airflow.pool.open_slots.*"
+    name: "airflow_pool_open_slots"
+    labels:
+      pool: "$1"
+
+  - match: "airflow.pool.queued_slots.*"
+    name: "airflow_pool_queued_slots"
+    labels:
+      pool: "$1"
+
+  - match: "airflow.pool.running_slots.*"
+    name: "airflow_pool_running_slots"
+    labels:
+      pool: "$1"
+
+  # DAG run states
+  - match: "airflow.dag_run.*.*.success"
+    name: "airflow_dag_run_success"
+    labels:
+      dag_id: "$1"
+      run_type: "$2"
+
+  - match: "airflow.dag_run.*.*.failed"
+    name: "airflow_dag_run_failed"
+    labels:
+      dag_id: "$1"
+      run_type: "$2"
+
+  - match: "airflow.dag_run.*.*.running"
+    name: "airflow_dag_run_running"
+    labels:
+      dag_id: "$1"
+      run_type: "$2"
+
+  # Task states
+  - match: "airflow.task.*.*.success"
+    name: "airflow_task_success"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+
+  - match: "airflow.task.*.*.failed"
+    name: "airflow_task_failed"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+
+  - match: "airflow.task.*.*.running"
+    name: "airflow_task_running"
+    labels:
+      dag_id: "$1"
+      task_id: "$2"
+
+  # Catch-all for other Airflow metrics
+  - match: "airflow.*"
+    name: "airflow_${1}"
+    labels:
+      metric_type: "other"

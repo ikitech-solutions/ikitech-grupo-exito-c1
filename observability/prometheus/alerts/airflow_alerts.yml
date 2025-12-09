@@ -1,0 +1,58 @@
+groups:
+  - name: airflow_alerts
+    interval: 30s
+    rules:
+      # DAG Failures
+      - alert: AirflowDAGFailed
+        expr: increase(airflow_dag_run_failed[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: airflow
+        annotations:
+          summary: "Airflow DAG {{ $labels.dag_id }} failed"
+          description: "DAG {{ $labels.dag_id }} has failed {{ $value }} times in the last 5 minutes"
+
+      # Task Failures
+      - alert: AirflowTaskFailed
+        expr: increase(airflow_task_failed[5m]) > 2
+        for: 2m
+        labels:
+          severity: warning
+          component: airflow
+        annotations:
+          summary: "Airflow tasks failing frequently"
+          description: "{{ $value }} task failures detected in the last 5 minutes"
+
+      # Scheduler Heartbeat
+      - alert: AirflowSchedulerDown
+        expr: time() - airflow_scheduler_heartbeat > 120
+        for: 2m
+        labels:
+          severity: critical
+          component: airflow
+        annotations:
+          summary: "Airflow Scheduler is down"
+          description: "Airflow Scheduler has not sent a heartbeat in {{ $value }} seconds"
+
+      # Task Queue Size
+      - alert: AirflowTaskQueueHigh
+        expr: airflow_executor_queued_tasks > 50
+        for: 5m
+        labels:
+          severity: warning
+          component: airflow
+        annotations:
+          summary: "Airflow task queue is growing"
+          description: "There are {{ $value }} tasks queued, which may indicate performance issues"
+
+      # DAG Processing Time
+      - alert: AirflowDAGProcessingSlow
+        expr: airflow_dag_processing_last_duration > 30
+        for: 5m
+        labels:
+          severity: warning
+          component: airflow
+        annotations:
+          summary: "DAG processing is slow"
+          description: "DAG {{ $labels.dag_id }} took {{ $value }} seconds to process"

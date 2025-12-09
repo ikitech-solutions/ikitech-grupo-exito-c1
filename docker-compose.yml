@@ -11,7 +11,8 @@ services:
       - "5432:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data
-      - ./dags/masterdata_ikitech/sql/db_masterdata_hub.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./dags/masterdata_ikitech/sql/db_masterdata_hub.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./observability/marquez/init-marquez-db.sql:/docker-entrypoint-initdb.d/02-init-marquez.sql
     restart: unless-stopped
 
   zookeeper:
@@ -29,6 +30,7 @@ services:
     container_name: kafka
     ports:
       - "9092:9092"
+      - "9308:9308"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
@@ -37,6 +39,12 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # JMX metrics for Prometheus
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: kafka
+      KAFKA_OPTS: "-javaagent:/opt/jmx_exporter/jmx_prometheus_javaagent.jar=9308:/opt/jmx_exporter/kafka-broker.yml"
+    volumes:
+      - ./observability/prometheus/jmx_exporter:/opt/jmx_exporter
     restart: unless-stopped
 
   oracle:
@@ -88,6 +96,15 @@ services:
       AIRFLOW__WEBSERVER__WORKERS: 2
       AIRFLOW_CONN_POSTGRES_MASTERDATA: postgresql://airflow:airflow@postgres:5432/airflow
       AIRFLOW_UID: 50000
+      # Observability - Metrics
+      AIRFLOW__METRICS__STATSD_ON: "True"
+      AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+      AIRFLOW__METRICS__STATSD_PORT: 9125
+      AIRFLOW__METRICS__STATSD_PREFIX: airflow
+      # Observability - OpenLineage for Marquez
+      AIRFLOW__LINEAGE__BACKEND: openlineage.lineage_backend.OpenLineageBackend
+      OPENLINEAGE_URL: http://marquez:5000
+      OPENLINEAGE_NAMESPACE: grupo_exito_c1
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
@@ -111,6 +128,17 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW_UID: 50000
       AIRFLOW_CONN_POSTGRES_MASTERDATA: postgresql://airflow:airflow@postgres:5432/airflow
+      # Observability - Metrics
+      AIRFLOW__METRICS__STATSD_ON: "True"
+      AIRFLOW__METRICS__STATSD_HOST: statsd-exporter
+      AIRFLOW__METRICS__STATSD_PORT: 9125
+      AIRFLOW__METRICS__STATSD_PREFIX: airflow
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 5
+      AIRFLOW__SCHEDULER__PRINT_STATS_INTERVAL: 30
+      # Observability - OpenLineage for Marquez
+      AIRFLOW__LINEAGE__BACKEND: openlineage.lineage_backend.OpenLineageBackend
+      OPENLINEAGE_URL: http://marquez:5000
+      OPENLINEAGE_NAMESPACE: grupo_exito_c1
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs

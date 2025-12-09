@@ -1,0 +1,58 @@
+groups:
+  - name: kafka_alerts
+    interval: 30s
+    rules:
+      # Kafka Broker Down
+      - alert: KafkaBrokerDown
+        expr: up{job="kafka"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: kafka
+        annotations:
+          summary: "Kafka broker is down"
+          description: "Kafka broker {{ $labels.instance }} has been down for more than 1 minute"
+
+      # Under-replicated Partitions
+      - alert: KafkaUnderReplicatedPartitions
+        expr: kafka_server_replicamanager_underreplicatedpartitions > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Kafka has under-replicated partitions"
+          description: "{{ $value }} partitions are under-replicated on {{ $labels.instance }}"
+
+      # Offline Partitions
+      - alert: KafkaOfflinePartitions
+        expr: kafka_controller_kafkacontroller_offlinepartitionscount > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: kafka
+        annotations:
+          summary: "Kafka has offline partitions"
+          description: "{{ $value }} partitions are offline"
+
+      # Consumer Lag
+      - alert: KafkaConsumerLagHigh
+        expr: kafka_consumergroup_lag > 1000
+        for: 10m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Kafka consumer lag is high"
+          description: "Consumer group {{ $labels.consumergroup }} has a lag of {{ $value }} messages on topic {{ $labels.topic }}"
+
+      # Disk Usage
+      - alert: KafkaDiskUsageHigh
+        expr: (kafka_log_log_size / kafka_log_log_size_limit) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Kafka disk usage is high"
+          description: "Kafka log directory is {{ $value | humanizePercentage }} full on {{ $labels.instance }}"
