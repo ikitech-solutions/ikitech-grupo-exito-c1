@@ -104,8 +104,6 @@ services:
       DATA_SOURCE_NAME: "postgresql://airflow:airflow@postgres:5432/airflow?sslmode=disable"
     networks:
       - mdh_network
-    depends_on:
-      - postgres
     restart: unless-stopped
 
   # Node Exporter - System metrics
@@ -160,8 +158,6 @@ services:
       - ./observability/marquez/marquez.yml:/usr/src/app/marquez.yml
     networks:
       - mdh_network
-    depends_on:
-      - postgres
     restart: unless-stopped
 
   # Marquez Web UI
@@ -175,8 +171,6 @@ services:
       - MARQUEZ_PORT=5000
     networks:
       - mdh_network
-    depends_on:
-      - marquez
     restart: unless-stopped
 
 networks:
