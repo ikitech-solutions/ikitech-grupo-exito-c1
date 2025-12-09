@@ -2,16 +2,18 @@
 
 ## Descripción General
 
-Este repositorio contiene la solución completa para la ingesta diaria de 12 archivos de maestras desde el ERP de Grupo Éxito. La solución está construida con Apache Airflow siguiendo una arquitectura **Event-Driven con patrones Publish-Subscribe**, implementando las mejores prácticas de Enterprise Integration Patterns (EIP) para garantizar escalabilidad, flexibilidad y desacoplamiento entre sistemas.
+Este repositorio contiene la solución completa para la ingesta diaria de archivos de maestras desde el ERP de Grupo Éxito. La solución está construida con Apache Airflow siguiendo una arquitectura **Event-Driven con patrones Publish-Subscribe**, implementando las mejores prácticas de Enterprise Integration Patterns (EIP) para garantizar escalabilidad, flexibilidad y desacoplamiento entre sistemas.
+
+**Valor Agregado:** Uso de **formato TOON** (en lugar de JSON) para configuración de layouts y mensajes en Kafka, proporcionando mayor compacidad, legibilidad y eficiencia en la transmisión de datos.
 
 ## Caso de Uso
 
-**Ingesta Diaria de 12 Archivos de Maestras ERP**
+**Ingesta Diaria de Archivos de Maestras ERP**
 
-- **Fuente:** 12 archivos de texto de ancho fijo (fixed-width) generados diariamente por el ERP
+- **Fuente:** Archivos de texto de ancho fijo (fixed-width) generados diariamente por el ERP
 - **Procesamiento:** Orquestado por Apache Airflow con procesamiento paralelo
 - **Validación:** Calidad de datos asegurada con validadores personalizados (reglas de negocio, tipos de datos, integridad referencial)
-- **Transformación:** Conversión de formato fixed-width a JSON canónico
+- **Transformación:** Conversión de formato fixed-width a **TOON** (formato canónico más compacto que JSON)
 - **Distribución:** Publicación en Apache Kafka para consumo desacoplado por sistemas finales
 - **Persistencia:** Carga a múltiples destinos (PostgreSQL, Oracle, MongoDB, SQL Server)
 - **Observabilidad:** Métricas en Prometheus, dashboards en Grafana, logs en Loki
@@ -26,7 +28,7 @@ La solución implementa una **Arquitectura Event-Driven con Publish-Subscribe**,
 
 #### **ZONA 1: SOURCE (Origen)**
 - **Componente:** ERP File System
-- **Descripción:** Sistema ERP que genera diariamente 12 archivos de maestras en formato fixed-width
+- **Descripción:** Sistema ERP que genera diariamente archivos de maestras en formato fixed-width
 - **Patrón EIP:** File Transfer
 
 #### **ZONA 2: LÓGICA DE INTEGRACIÓN (Orquestación Airflow)**
@@ -103,7 +105,7 @@ La solución implementa una **Arquitectura Event-Driven con Publish-Subscribe**,
 │             │     │ Kafka Event Bus      │     │                 │
 └─────────────┘     └──────────────────────┘     └─────────────────┘
     Negocio              Canónico                      Target
-                        <Parquet>                    <entity>
+                         <TOON>                     <entity>
                         <entity>
 ```
 
@@ -111,10 +113,10 @@ La solución implementa una **Arquitectura Event-Driven con Publish-Subscribe**,
 
 ```mermaid
 graph LR
-    A[ERP File System] -->|12 archivos diarios| B(Airflow DAG Maestro)
+    A[ERP File System] -->|Archivos diarios| B(Airflow DAG Maestro)
     B -->|Descubre archivos| C{Procesamiento Paralelo}
     
-    subgraph "DAGs Hijos (12)"
+    subgraph "DAGs Hijos (N archivos)"
         C --> D1[Parse Fixed-Width]
         D1 --> D2[Validación Schema]
         D2 --> D3[Validación Business Rules]
@@ -165,7 +167,7 @@ graph LR
   2. **Schema Validation:** Validar tipos de datos y campos requeridos
   3. **Business Rules:** Aplicar reglas de negocio específicas
   4. **Data Quality:** Verificar completitud y consistencia
-  5. **Transformación:** Convertir a modelo canónico (JSON)
+  5. **Transformación:** Convertir a modelo canónico (formato TOON)
   6. **Enriquecimiento:** Agregar metadatos (timestamp, source, version)
   7. **Publicación Kafka:** Enviar eventos a topics correspondientes
   8. **Persistencia PostgreSQL:** Guardar en Master Data Hub
@@ -175,7 +177,7 @@ graph LR
 ### 3. Parser de Fixed-Width
 - **Módulo:** `parsers.fixed_width_parser`
 - **Clase:** `FixedWidthParser`
-- **Configuración:** `config/layouts.json`
+- **Configuración:** `config/layouts.toon`
 - **Funcionalidad:** Lee archivos de ancho fijo y los convierte a diccionarios Python
 
 ### 4. Validadores
@@ -190,12 +192,14 @@ graph LR
 ### 5. Apache Kafka (Event Bus)
 - **Propósito:** Distribución desacoplada de eventos a sistemas finales
 - **Topics:** Un topic por maestra con log compaction
+- **Formato de Mensajes:** TOON (más compacto y legible que JSON)
 - **Consumer Groups:** Cada sistema consumidor tiene su propio grupo
 - **Ventajas:**
   - Desacoplamiento entre productores y consumidores
   - Escalabilidad horizontal
   - Replay de eventos
   - Garantía de entrega (at-least-once)
+  - Mensajes más eficientes con formato TOON
 
 ### 6. PostgreSQL Master Data Hub
 - **Propósito:** Sistema de registro (System of Record) para datos maestros
@@ -221,7 +225,8 @@ ikitech-grupo-exito-c1/
 │       ├── dag_ingesta_diaria_maestras.py       # DAG maestro
 │       ├── dag_procesamiento_archivo_maestra.py # DAG hijo
 │       ├── config/                 # Configuraciones
-│       │   ├── layouts.json        # Layouts de archivos fixed-width
+│       │   ├── layouts.toon        # Layouts de archivos fixed-width (formato TOON)
+│       │   ├── layouts.json        # Layouts en JSON (legacy)
 │       │   └── file_table_mapping.json  # Mapeo archivo-tabla-topic
 │       ├── parsers/                # Módulo de parseo
 │       │   └── fixed_width_parser.py
@@ -230,6 +235,7 @@ ikitech-grupo-exito-c1/
 │       ├── sql/                    # Scripts SQL
 │       │   └── db_masterdata_hub.sql
 │       └── utils/                  # Utilidades compartidas
+│           └── toon_encoder.py     # Encoder/decoder para formato TOON
 ├── docs/                           # Documentación técnica
 │   ├── architecture-diagram.png    # Diagrama de arquitectura aprobado
 │   ├── observability_stack.md      # Documentación de observabilidad
@@ -268,7 +274,7 @@ Configurar en la UI de Airflow (`Admin` → `Variables`):
 
 ### Configuración de Layouts
 
-El archivo `dags/masterdata_ikitech/config/layouts.json` contiene la configuración de parseo para cada uno de los 12 archivos, especificando:
+El archivo `dags/masterdata_ikitech/config/layouts.toon` contiene la configuración de parseo para cada uno de los archivos de maestras en formato TOON, especificando:
 - Nombre del campo
 - Posición inicial
 - Longitud
