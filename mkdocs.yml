@@ -6,6 +6,7 @@ nav:
   - Arquitectura: arquitectura.md
   - Configuración: configuracion.md
   - Operación: operacion.md
+  - Observabilidad: observability_stack.md
 
 theme:
   name: material

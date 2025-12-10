@@ -1,0 +1,96 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Airflow Scheduler logs
+  - job_name: airflow-scheduler
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: airflow-scheduler
+          component: airflow
+          __path__: /opt/airflow/logs/scheduler/**/*.log
+
+  # Airflow DAG logs
+  - job_name: airflow-dags
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: airflow-dags
+          component: airflow
+          __path__: /opt/airflow/logs/dag_id=*/**/*.log
+    pipeline_stages:
+      - regex:
+          expression: '.*dag_id=(?P<dag_id>[^/]+)/.*'
+      - labels:
+          dag_id:
+
+  # Airflow Task logs
+  - job_name: airflow-tasks
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: airflow-tasks
+          component: airflow
+          __path__: /opt/airflow/logs/dag_id=*/run_id=*/task_id=*/**/*.log
+    pipeline_stages:
+      - regex:
+          expression: '.*dag_id=(?P<dag_id>[^/]+)/run_id=(?P<run_id>[^/]+)/task_id=(?P<task_id>[^/]+)/.*'
+      - labels:
+          dag_id:
+          run_id:
+          task_id:
+
+  # Airflow Webserver logs
+  - job_name: airflow-webserver
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: airflow-webserver
+          component: airflow
+          __path__: /opt/airflow/logs/webserver/**/*.log
+
+  # Kafka logs
+  - job_name: kafka
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: kafka
+          component: kafka
+          __path__: /var/log/kafka/**/*.log
+
+  # PostgreSQL logs
+  - job_name: postgresql
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: postgresql
+          component: postgresql
+          __path__: /var/log/postgresql/**/*.log
+
+  # Docker container logs (via Docker socket)
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container'
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: 'stream'
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: 'service'

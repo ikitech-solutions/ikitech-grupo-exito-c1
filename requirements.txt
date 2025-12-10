@@ -5,3 +5,4 @@ openpyxl>=3.0.10
 pandas
 oracledb
 pyarrow
+toon-format>=1.0.0
